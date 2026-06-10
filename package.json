@@ -12,5 +12,7 @@
   "author": "",
   "license": "ISC",
   "type": "module",
-  "dependencies": {}
+  "dependencies": {
+    "express": "^5.2.1"
+  }
 }
