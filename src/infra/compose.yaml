@@ -3,6 +3,7 @@ version: "3.5"
 services:
   db:
     image: postgres:16-alpine
+    container_name: rinha-db
     environment:
       POSTGRES_USER: rinha
       POSTGRES_PASSWORD: rinha
