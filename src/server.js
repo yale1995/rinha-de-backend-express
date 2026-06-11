@@ -47,6 +47,29 @@ app.get("/pessoas/:id", async (request, response) => {
   return response.status(200).json(result.rows[0]);
 });
 
+app.get("/pessoas", async (request, response) => {
+  const { t } = request.query;
+
+  const result = await client.query(
+    `
+    SELECT 
+      * 
+    FROM 
+      pessoas 
+    WHERE 
+      nome ILIKE $1
+    OR
+      apelido ILIKE $1
+    OR
+      ARRAY_TO_STRING(stack, ',') ILIKE $1
+    LIMIT 50
+    `,
+    [`%${t}%`],
+  );
+
+  return response.status(200).json(result.rows);
+});
+
 app.listen(3000, () => {
   console.log(`app is running`);
 });
