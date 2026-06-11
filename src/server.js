@@ -18,6 +18,21 @@ app.post("/pessoas", async (request, response) => {
   return response.status(201).send();
 });
 
+app.get("/pessoas/:id", async (request, response) => {
+  const { id } = request.params;
+
+  const result = await client.query(
+    "SELECT id, apelido, nome, nascimento, stack FROM pessoas WHERE id = $1",
+    [id]
+  );
+
+  if (result.rows.length === 0) {
+    return response.status(404).send();
+  }
+
+  return response.status(200).json(result.rows[0]);
+});
+
 app.listen(3000, () => {
   console.log(`app is running`);
 });
