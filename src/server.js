@@ -8,8 +8,15 @@ app.post("/pessoas", async (request, response) => {
   const { apelido, nome, nascimento, stack } = request.body;
 
   const result = await client.query(
-    "INSERT INTO pessoas (apelido, nome, nascimento, stack) VALUES ($1, $2, $3, $4) RETURNING id",
-    [apelido, nome, nascimento, stack]
+    `
+    INSERT INTO 
+      pessoas (
+        apelido, nome, nascimento, stack) 
+      VALUES 
+        ($1, $2, $3, $4) 
+    RETURNING id
+    `,
+    [apelido, nome, nascimento, stack],
   );
 
   const { id } = result.rows[0];
@@ -22,8 +29,15 @@ app.get("/pessoas/:id", async (request, response) => {
   const { id } = request.params;
 
   const result = await client.query(
-    "SELECT id, apelido, nome, nascimento, stack FROM pessoas WHERE id = $1",
-    [id]
+    `
+    SELECT 
+      * 
+    FROM 
+      pessoas 
+    WHERE 
+      id = $1
+    `,
+    [id],
   );
 
   if (result.rows.length === 0) {
