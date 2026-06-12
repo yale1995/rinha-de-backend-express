@@ -12,19 +12,19 @@ app.post("/pessoas", async (request, response) => {
   }
 
   if (typeof nome !== "string" || typeof apelido !== "string") {
-    return response.status(422).end();
+    return response.status(400).end();
   }
 
   if (stack && !Array.isArray(stack)) {
-    return response.status(422).end();
+    return response.status(400).end();
   }
 
   if (Array.isArray(stack) && stack.some((item) => typeof item !== "string")) {
-    return response.status(422).end();
+    return response.status(400).end();
   }
 
   if (typeof nascimento !== "string") {
-    return response.status(422).end();
+    return response.status(400).end();
   }
 
   const parsedDate = new Date(nascimento);
@@ -64,7 +64,7 @@ app.get("/pessoas/:id", async (request, response) => {
   const result = await client.query(
     `
     SELECT 
-      * 
+      id, apelido, nome, to_char(nascimento, 'YYYY-MM-DD') as nascimento, stack
     FROM 
       pessoas 
     WHERE 
@@ -83,10 +83,14 @@ app.get("/pessoas/:id", async (request, response) => {
 app.get("/pessoas", async (request, response) => {
   const { t } = request.query;
 
+  if (!t) {
+    return response.status(400).end();
+  }
+
   const result = await client.query(
     `
     SELECT 
-      * 
+      id, apelido, nome, to_char(nascimento, 'YYYY-MM-DD') as nascimento, stack 
     FROM 
       pessoas 
     WHERE 
@@ -113,7 +117,7 @@ app.get("/contagem-pessoas", async (request, response) => {
     `,
   );
 
-  return response.status(200).json(result.rows[0]);
+  return response.status(200).send(result.rows[0].count);
 });
 
 app.listen(3000, () => {
