@@ -70,6 +70,19 @@ app.get("/pessoas", async (request, response) => {
   return response.status(200).json(result.rows);
 });
 
+app.get("/contagem-pessoas", async (request, response) => {
+  const result = await client.query(
+    `
+    SELECT COUNT 
+      (*) 
+    FROM 
+      pessoas 
+    `,
+  );
+
+  return response.status(200).json(result.rows[0]);
+});
+
 app.listen(3000, () => {
   console.log(`app is running`);
 });
