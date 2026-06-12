@@ -7,22 +7,55 @@ app.use(express.json());
 app.post("/pessoas", async (request, response) => {
   const { apelido, nome, nascimento, stack } = request.body;
 
-  const result = await client.query(
-    `
-    INSERT INTO 
-      pessoas (
-        apelido, nome, nascimento, stack) 
-      VALUES 
-        ($1, $2, $3, $4) 
-    RETURNING id
-    `,
-    [apelido, nome, nascimento, stack],
-  );
+  if (!nome || !apelido || !nascimento) {
+    return response.status(422).end();
+  }
 
-  const { id } = result.rows[0];
+  if (typeof nome !== "string" || typeof apelido !== "string") {
+    return response.status(422).end();
+  }
 
-  response.setHeader("Location", `/pessoas/${id}`);
-  return response.status(201).send();
+  if (stack && !Array.isArray(stack)) {
+    return response.status(422).end();
+  }
+
+  if (Array.isArray(stack) && stack.some((item) => typeof item !== "string")) {
+    return response.status(422).end();
+  }
+
+  if (typeof nascimento !== "string") {
+    return response.status(422).end();
+  }
+
+  const parsedDate = new Date(nascimento);
+
+  if (
+    isNaN(parsedDate.getTime()) ||
+    parsedDate.toISOString().slice(0, 10) !== nascimento
+  ) {
+    return response.status(422).end();
+  }
+
+  try {
+    const result = await client.query(
+      `
+      INSERT INTO
+        pessoas (
+          apelido, nome, nascimento, stack)
+        VALUES
+          ($1, $2, $3, $4)
+      RETURNING id
+      `,
+      [apelido, nome, nascimento, stack],
+    );
+
+    const { id } = result.rows[0];
+
+    response.setHeader("Location", `/pessoas/${id}`);
+    return response.status(201).send();
+  } catch {
+    return response.status(422).end();
+  }
 });
 
 app.get("/pessoas/:id", async (request, response) => {
