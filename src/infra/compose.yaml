@@ -16,8 +16,8 @@ services:
       timeout: 2s
       retries: 10
 
-  api:
-    container_name: "rinha_api"
+  api1:
+    container_name: "rinha_api1"
     build:
       context: ../..
       dockerfile: src/infra/dockerfile
@@ -30,5 +30,29 @@ services:
       DATABASE_NAME: rinha
       DATABASE_USER: rinha
       DATABASE_PASSWORD: rinha
+
+  api2:
+    container_name: "rinha_api2"
+    build:
+      context: ../..
+      dockerfile: src/infra/dockerfile
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DATABASE_HOST: database
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rinha
+      DATABASE_USER: rinha
+      DATABASE_PASSWORD: rinha
+
+  nginx:
+    container_name: "rinha_nginx"
+    image: "nginx:alpine"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api1
+      - api2
     ports:
-      - "3000:3000"
+      - "9999:9999"
