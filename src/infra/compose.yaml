@@ -10,3 +10,25 @@ services:
       - 5432:5432
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rinha -d rinha"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  api:
+    container_name: "rinha_api"
+    build:
+      context: ../..
+      dockerfile: src/infra/dockerfile
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DATABASE_HOST: database
+      DATABASE_PORT: 5432
+      DATABASE_NAME: rinha
+      DATABASE_USER: rinha
+      DATABASE_PASSWORD: rinha
+    ports:
+      - "3000:3000"
