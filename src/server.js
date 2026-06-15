@@ -1,5 +1,5 @@
 import express from "express";
-import { client } from "./infra/database.js";
+import { query } from "./infra/database.js";
 
 const app = express();
 app.use(express.json());
@@ -37,7 +37,7 @@ app.post("/pessoas", async (request, response) => {
   }
 
   try {
-    const result = await client.query(
+    const result = await query(
       `
       INSERT INTO
         pessoas (
@@ -61,7 +61,7 @@ app.post("/pessoas", async (request, response) => {
 app.get("/pessoas/:id", async (request, response) => {
   const { id } = request.params;
 
-  const result = await client.query(
+  const result = await query(
     `
     SELECT 
       id, apelido, nome, to_char(nascimento, 'YYYY-MM-DD') as nascimento, stack
@@ -87,7 +87,7 @@ app.get("/pessoas", async (request, response) => {
     return response.status(400).end();
   }
 
-  const result = await client.query(
+  const result = await query(
     `
     SELECT 
       id, apelido, nome, to_char(nascimento, 'YYYY-MM-DD') as nascimento, stack 
@@ -108,7 +108,7 @@ app.get("/pessoas", async (request, response) => {
 });
 
 app.get("/contagem-pessoas", async (request, response) => {
-  const result = await client.query(
+  const result = await query(
     `
     SELECT COUNT 
       (*) 
