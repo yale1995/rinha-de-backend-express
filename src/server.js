@@ -94,11 +94,7 @@ app.get("/pessoas", async (request, response) => {
     FROM 
       pessoas 
     WHERE 
-      nome ILIKE $1
-    OR
-      apelido ILIKE $1
-    OR
-      ARRAY_TO_STRING(stack, ',') ILIKE $1
+      busca ILIKE $1
     LIMIT 50
     `,
     [`%${t}%`],
