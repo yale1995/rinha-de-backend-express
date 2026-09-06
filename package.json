@@ -6,7 +6,18 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "infra:up": "docker compose -f src/infra/compose.yaml up --build -d",
+    "infra:down": "docker compose -f src/infra/compose.yaml down -v",
+    "infra:logs": "docker compose -f src/infra/compose.yaml logs -f",
+    "infra:wait": "until [ \"$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9999/contagem-pessoas)\" = 200 ]; do sleep 1; done",
+    "infra:reset": "npm run infra:down && npm run infra:up && npm run infra:wait && npm run db:count",
+    "db:count": "curl -s http://localhost:9999/contagem-pessoas; echo",
+    "db:connections": "docker exec rinha_database psql -U rinha -d rinha -tAc \"select count(*) from pg_stat_activity where datname='rinha' and pid != pg_backend_pid()\"",
+    "stress": "./stress-test/run-test.sh",
+    "report": "open \"$(ls -dt stress-test/user-files/results/*/ | head -1)index.html\"",
+    "bench": "npm run infra:reset && npm run stress",
+    "stress:data": "cd stress-test && python3 geracao_recursos.py",
+    "stats": "docker stats rinha_nginx rinha_api1 rinha_api2 rinha_database"
   },
   "keywords": [],
   "author": "",
