@@ -1,315 +1,328 @@
 # Benchmarks
 
-Medições desta API sob o teste de stress oficial da
+Measurements of this API under the official stress test of the
 [Rinha de Backend 2023/Q3](https://github.com/zanfranceschi/rinha-de-backend-2023-q3).
 
-Cada abordagem muda **uma variável por vez** e é medida sob condições idênticas,
-para que os números sejam diretamente comparáveis.
+Each approach changes **one variable at a time** and is measured under identical
+conditions, so the numbers are directly comparable.
+
+The endpoint names — `criação`, `consulta`, `busca válida`, `busca inválida` —
+are kept in Portuguese throughout: they are the literal request labels of the
+official Gatling simulation, and they appear that way in every report. They mean
+creation, fetch, valid search and invalid search.
 
 ---
 
-## Comparativo
+## Comparison
 
-| # | Abordagem | Sucesso | Usuários criados | p50 | p99 | Vazão máx | Ruptura | Gargalo |
+| # | Approach | Success | People created | p50 | p99 | Peak throughput | Breaking point | Bottleneck |
 |---|---|---|---|---|---|---|---|---|
-| [1](#abordagem-1--conexão-única-1-réplica) | `pg.Client`, 1 réplica | 59,60% | 25.166 | 1 ms | 1.486 ms | 610 req/s | 371 u/s | `Seq Scan` sem índice |
-| [2](#abordagem-2--conexão-única-2-réplicas) | `pg.Client`, 2 réplicas | 74,49% | 32.111 | 1 ms | 1.576 ms | 745 req/s | 459 u/s | `Seq Scan` sem índice |
-| [3](#abordagem-3--conexão-única-1-réplica-índice-gin--pg_trgm) | `pg.Client`, 1 réplica, GIN `pg_trgm` | **93,62%** | **42.851** | 1 ms | **733 ms** | **1.257 req/s** | 467 u/s | conexão única + slots do nginx |
-| [4](#abordagem-4--2-réplicas-índice-gin--pg_trgm) | `pg.Client`, 2 réplicas, GIN `pg_trgm` | **99,96%** | **46.549** | 1 ms | **212 ms** | 1.256 req/s ¹ | — | picos da conexão única → slots do nginx |
-| [5](#abordagem-5--conexão-por-requisição-tryfinally) | conexão por requisição, 2 réplicas, GIN | 99,51% | 45.660 | 5 ms | 203 ms | 1.263 req/s ¹ | — | `max_connections` do Postgres |
-| [6](#abordagem-6--pool-de-conexões-pgpool) | `pg.Pool` (10/processo), 2 réplicas, GIN | **100,00%** | **46.580** | 1 ms | **20 ms** | 1.267 req/s ¹ | — | **nenhum atingido** |
-| [7](#abordagem-7--conformidade-15-cpu-e-30-gb) | pool + 2 réplicas + GIN, **1,5 CPU / 3,0 GB** | 60,72% | 23.611 | 1 ms | 2.429 ms | 902 req/s ² | 395 u/s | CPU do Postgres (throttling) |
-| [8](#abordagem-8--conformidade-com-orçamento-redistribuído) | idem, orçamento redistribuído (db 1,00) | 74,54% | 30.603 | 1 ms | 1.590 ms | 1.600 req/s ² | 499 u/s | CPU do Postgres (throttling) |
+| [1](#approach-1--single-connection-1-replica) | `pg.Client`, 1 replica | 59.60% | 25,166 | 1 ms | 1,486 ms | 610 req/s | 371 u/s | `Seq Scan`, no index |
+| [2](#approach-2--single-connection-2-replicas) | `pg.Client`, 2 replicas | 74.49% | 32,111 | 1 ms | 1,576 ms | 745 req/s | 459 u/s | `Seq Scan`, no index |
+| [3](#approach-3--single-connection-1-replica-gin--pg_trgm-index) | `pg.Client`, 1 replica, GIN `pg_trgm` | **93.62%** | **42,851** | 1 ms | **733 ms** | **1,257 req/s** | 467 u/s | single connection + nginx slots |
+| [4](#approach-4--2-replicas-gin--pg_trgm-index) | `pg.Client`, 2 replicas, GIN `pg_trgm` | **99.96%** | **46,549** | 1 ms | **212 ms** | 1,256 req/s ¹ | — | single-connection spikes → nginx slots |
+| [5](#approach-5--connection-per-request-tryfinally) | connection per request, 2 replicas, GIN | 99.51% | 45,660 | 5 ms | 203 ms | 1,263 req/s ¹ | — | Postgres `max_connections` |
+| [6](#approach-6--connection-pool-pgpool) | `pg.Pool` (10/process), 2 replicas, GIN | **100.00%** | **46,580** | 1 ms | **20 ms** | 1,267 req/s ¹ | — | **none reached** |
+| [7](#approach-7--compliance-15-cpu-and-30-gb) | pool + 2 replicas + GIN, **1.5 CPU / 3.0 GB** | 60.72% | 23,611 | 1 ms | 2,429 ms | 902 req/s ² | 395 u/s | Postgres CPU (throttling) |
+| [8](#approach-8--compliance-with-a-redistributed-budget) | same, budget redistributed (db 1.00) | 74.54% | 30,603 | 1 ms | 1,590 ms | 1,600 req/s ² | 499 u/s | Postgres CPU (throttling) |
 
 
-¹ A partir da abordagem 3 a vazão máxima passa a ser limitada pela rampa do
-Gatling, que satura em 740 usuários/s. O número deixa de medir a capacidade do
-sistema — ver [diagnóstico da abordagem 4](#a-pergunta-dos-2-não-pôde-ser-respondida).
+¹ From approach 3 onward, peak throughput becomes limited by the Gatling ramp,
+which saturates at 740 users/s. The number stops measuring the capacity of the
+system — see the [diagnosis of approach 4](#the-2-question-could-not-be-answered).
 
 ---
 
-## Abordagem 1 — conexão única, 1 réplica
+## Approach 1 — single connection, 1 replica
 
 ```
 nginx (1 worker, 512 slots)
-  └── api1 ── 1 processo Node ── 1 conexão ── Postgres
+  └── api1 ── 1 Node process ── 1 connection ── Postgres
 ```
 
-Ponto de partida ingênuo: um único processo Node abre **uma** conexão com o
-Postgres no boot e a reutiliza para todas as requisições. Sem pool, sem réplicas,
-sem índices além dos criados pelo schema. Serve de linha de base para tudo o que
-vier depois.
+The naive starting point: a single Node process opens **one** connection to
+Postgres at boot and reuses it for every request. No pool, no replicas, no
+indexes beyond the ones the schema creates. It serves as the baseline for
+everything that follows.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Client` — uma conexão aberta no boot |
-| Réplicas da API | 1 |
-| Load balancer | nginx, configuração padrão |
-| Limites de CPU/memória | nenhum |
-| Índices | apenas PK e `UNIQUE` de `apelido` |
-| Execuções | 2 independentes, métricas dentro de 1% entre si |
+| Database strategy | `pg.Client` — one connection opened at boot |
+| API replicas | 1 |
+| Load balancer | nginx, default configuration |
+| CPU/memory limits | none |
+| Indexes | primary key and `UNIQUE` on `apelido` only |
+| Runs | 2 independent, metrics within 1% of each other |
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor |
+| Metric | Value |
 |---|---|
-| **Requisições** | 93.581 |
-| **Sucesso** | 55.775 — **59,60%** |
-| Falhas | 37.806 |
-| **Usuários criados** | **25.166** |
-| Escritas perdidas | 0 |
+| **Requests** | 93,581 |
+| **Success** | 55,775 — **59.60%** |
+| Failures | 37,806 |
+| **People created** | **25,166** |
+| Lost writes | 0 |
 | **p50** | **1 ms** |
 | p75 | 538 ms |
-| p95 | 1.264 ms |
-| **p99** | **1.486 ms** |
-| máx | 1.677 ms |
-| média | 257 ms |
-| **Vazão máxima com 100% de sucesso** | **610 req/s** |
-| Vazão com p50 ≤ 20 ms | 577 req/s |
-| Vazão útil média | 272 req/s |
-| **Ponto de ruptura** | **t=113s — 371 usuários/s injetados** |
-| Início da degradação | t=107s |
-| Concorrência no pico | 272 simultâneos |
-| Vazão nos últimos 60s | 237 req/s (−61% desde o pico) |
+| p95 | 1,264 ms |
+| **p99** | **1,486 ms** |
+| max | 1,677 ms |
+| mean | 257 ms |
+| **Peak throughput at 100% success** | **610 req/s** |
+| Throughput at p50 ≤ 20 ms | 577 req/s |
+| Mean useful throughput | 272 req/s |
+| **Breaking point** | **t=113s — 371 users/s injected** |
+| Degradation starts | t=107s |
+| Peak concurrency | 272 simultaneous |
+| Throughput in the last 60s | 237 req/s (−61% from the peak) |
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 | Custo no Postgres |
+| Endpoint | Requests | OK | KO | p50 | p99 | Cost in Postgres |
 |---|---|---|---|---|---|---|
-| criação | 54.635 | 29.473 | 25.162 | 1 ms | 1.497 ms | 0,25 ms (Insert) |
-| consulta | 25.166 | 18.707 | 6.459 | 2 ms | 1.442 ms | 0,14 ms (Index Scan) |
-| busca válida | 9.590 | 5.262 | 4.328 | 7 ms | 1.518 ms | **57,57 ms (Seq Scan)** |
-| busca inválida | 4.190 | 2.333 | 1.857 | 1 ms | 5 ms | não toca o banco |
+| criação | 54,635 | 29,473 | 25,162 | 1 ms | 1,497 ms | 0.25 ms (Insert) |
+| consulta | 25,166 | 18,707 | 6,459 | 2 ms | 1,442 ms | 0.14 ms (Index Scan) |
+| busca válida | 9,590 | 5,262 | 4,328 | 7 ms | 1,518 ms | **57.57 ms (Seq Scan)** |
+| busca inválida | 4,190 | 2,333 | 1,857 | 1 ms | 5 ms | never touches the database |
 
-### Diagnóstico
+### Diagnosis
 
-**Gargalo: o `Seq Scan` da busca.** O `ILIKE '%termo%'` com curinga à esquerda
-não usa índice B-tree e varre a tabela inteira — 57,57 ms com 25 mil linhas,
-cerca de 400× o custo das outras queries. Como a conexão é única e serializa
-tudo, esse custo domina, e **piora durante a corrida**: cada criação bem-sucedida
-encarece as buscas seguintes.
+**Bottleneck: the `Seq Scan` behind the search.** The `ILIKE '%term%'` with a
+leading wildcard cannot use a B-tree index and scans the whole table — 57.57 ms
+at 25 thousand rows, about 400× the cost of the other queries. Since the
+connection is single and serializes everything, that cost dominates, and it
+**gets worse during the run**: every successful creation makes the following
+searches more expensive.
 
-| Momento | linhas | custo do scan | fatia do tempo da conexão | capacidade |
+| Moment | rows | scan cost | share of the connection's time | capacity |
 |---|---|---|---|---|
-| t=50s | 1.207 | 2,8 ms | 44% | ~1.430 q/s |
-| t=110s | 10.932 | 25,0 ms | **85%** | ~370 q/s |
-| t=200s | 24.503 | 56,1 ms | **93%** | ~180 q/s |
+| t=50s | 1,207 | 2.8 ms | 44% | ~1,430 q/s |
+| t=110s | 10,932 | 25.0 ms | **85%** | ~370 q/s |
+| t=200s | 24,503 | 56.1 ms | **93%** | ~180 q/s |
 
-A busca é 8,9% das queries e consome 85% da conexão no momento da quebra. A carga
-sobe enquanto a capacidade cai; a ruptura é onde as curvas se cruzam.
+The search is 8.9% of the queries and consumes 85% of the connection at the
+moment it breaks. Load rises while capacity falls; the breaking point is where
+the curves cross.
 
-**Mas as falhas aconteceram no nginx.** A latência do banco inflou a concorrência
-(`L = λ × W`) até esgotar os 512 slots do worker padrão — como proxy, cada
-requisição ocupa dois slots, logo o teto real é 256 simultâneas. A concorrência
-cruzou esse limite em t=113s, exatamente o segundo da primeira falha, e travou em
-262–265 pelos 90 s restantes mesmo com a injeção dobrando.
+**But the failures happened in nginx.** The database latency inflated
+concurrency (`L = λ × W`) until it exhausted the default worker's 512 slots — as
+a proxy, each request occupies two slots, so the real ceiling is 256 simultaneous.
+Concurrency crossed that limit at t=113s, exactly the second of the first
+failure, and stayed pinned at 262–265 for the remaining 90 s even as injection
+doubled.
 
 ```
-Seq Scan caro → latência alta → concorrência infla
-              → 512 slots esgotam → nginx fecha o socket
+expensive Seq Scan → high latency → concurrency inflates
+                   → 512 slots exhausted → nginx closes the socket
 ```
 
-O nginx é **onde** o sistema quebrou; o índice ausente é **por que**.
+nginx is **where** the system broke; the missing index is **why**.
 
-Três evidências sustentam isso:
+Three pieces of evidence support this:
 
-- **Os 37.806 KOs não têm uma linha de access log** e trazem uma única mensagem
-  no cliente, `Premature close`. Não há `502`, `504` nem `503` — as conexões
-  morreram antes de o nginx alocar um slot. O `busca inválida`, que responde
-  `400` sem tocar no banco, teve p99 de 5 ms e ainda assim 44% de falhas.
-- **Com latência saudável o limite nunca seria atingido.** Em t=106s, `W = 23 ms`
-  e a concorrência era 8. Projetando esse W para o pico de 722 u/s: 17 usuários,
-  34 slots — 15× de folga.
-- **Os três endpoints que tocam o banco convergiram em ~270 ms de média**, apesar
-  de custos reais de 0,14 / 0,25 / 57,57 ms. A latência não vem do trabalho, vem
-  da fila: o `_queryQueue` do `pg.Client` despacha uma query por vez. O `criação`
-  tem p50 de 1 ms e p75 de 561 ms — um penhasco, não uma curva: duas populações,
-  fila vazia e fila cheia, nada no meio.
+- **The 37,806 KOs have not a single line of access log** and carry a single
+  message on the client, `Premature close`. There is no `502`, `504` or `503` —
+  the connections died before nginx allocated a slot. `busca inválida`, which
+  answers `400` without touching the database, had a p99 of 5 ms and still 44%
+  failures.
+- **With healthy latency the limit would never be reached.** At t=106s, `W = 23 ms`
+  and concurrency was 8. Projecting that W to the peak of 722 u/s: 17 users,
+  34 slots — 15× of headroom.
+- **The three endpoints that touch the database converged on ~270 ms mean**,
+  despite real costs of 0.14 / 0.25 / 57.57 ms. The latency does not come from
+  the work, it comes from the queue: the `_queryQueue` of `pg.Client` dispatches
+  one query at a time. `criação` has a p50 of 1 ms and a p75 of 561 ms — a cliff,
+  not a curve: two populations, empty queue and full queue, nothing in between.
 
-### Próximo passo
+### Next step
 
-Três correções atacam coisas diferentes e devem ser medidas separadamente:
+Three fixes attack different things and must be measured separately:
 
-- **Réplicas da API** (abordagem 2) — mais processos, mais conexões, mas o custo
-  de cada scan continua o mesmo.
-- **Pool de conexões** — não torna o scan mais barato, permite que ele aconteça
-  em paralelo. Resolve o head-of-line blocking.
-- **Índice `pg_trgm` + GIN** — elimina o trabalho em vez de paralelizá-lo. Ataca
-  a causa raiz.
+- **API replicas** (approach 2) — more processes, more connections, but the cost
+  of each scan stays the same.
+- **Connection pool** — does not make the scan cheaper, it lets it happen in
+  parallel. Solves head-of-line blocking.
+- **`pg_trgm` + GIN index** — removes the work instead of parallelizing it.
+  Attacks the root cause.
 
 ---
 
-## Abordagem 2 — conexão única, 2 réplicas
+## Approach 2 — single connection, 2 replicas
 
 ```
 nginx (1 worker, 512 slots, round-robin)
-  ├── api1 ── 1 processo Node ── 1 conexão ─┐
-  └── api2 ── 1 processo Node ── 1 conexão ─┴── Postgres
+  ├── api1 ── 1 Node process ── 1 connection ─┐
+  └── api2 ── 1 Node process ── 1 connection ─┴── Postgres
 ```
 
-Mesmo código da abordagem 1: cada processo continua com **uma** conexão
-`pg.Client`. A única variável alterada é o número de réplicas — o nginx passa a
-distribuir a carga entre `api1` e `api2` em round-robin. Duas filas independentes
-de profundidade 1 em vez de uma.
+Same code as approach 1: each process still holds **one** `pg.Client` connection.
+The only variable changed is the replica count — nginx now spreads the load
+between `api1` and `api2` in round-robin. Two independent queues of depth 1
+instead of one.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Client` — uma conexão por processo |
-| Réplicas da API | 2 |
-| Load balancer | nginx, upstream round-robin |
-| Limites de CPU/memória | nenhum |
-| Índices | apenas PK e `UNIQUE` de `apelido` |
+| Database strategy | `pg.Client` — one connection per process |
+| API replicas | 2 |
+| Load balancer | nginx, round-robin upstream |
+| CPU/memory limits | none |
+| Indexes | primary key and `UNIQUE` on `apelido` only |
 
-### Previsão registrada antes da corrida
+### Prediction recorded before the run
 
-Custo da busca medido com `EXPLAIN ANALYZE` sobre as 32.111 linhas deixadas pela
-abordagem 2, antes e depois do índice:
+Search cost measured with `EXPLAIN ANALYZE` over the 32,111 rows left behind by
+approach 2, before and after the index:
 
-| Termo | `Seq Scan` | GIN trigram | Ganho |
+| Term | `Seq Scan` | GIN trigram | Gain |
 |---|---|---|---|
-| inexistente | 63,08 ms | **0,12 ms** | **525×** |
-| `Node` | 55,05 ms | **0,16 ms** | 344× |
-| `ana` | 27,39 ms | **0,30 ms** | 92× |
+| nonexistent | 63.08 ms | **0.12 ms** | **525×** |
+| `Node` | 55.05 ms | **0.16 ms** | 344× |
+| `ana` | 27.39 ms | **0.30 ms** | 92× |
 
-Previsões: a ruptura deve sumir ou ir para muito perto do fim; se persistir, o
-gargalo mudou de lugar. Apenas ~4% das buscas (termos de 1–2 caracteres, que não
-geram trigrama) devem cair em `Seq Scan`. E o índice GIN deve encarecer o
-`INSERT` — se a vazão de escrita cair, o custo apareceu.
+Predictions: the breaking point should disappear or move very close to the end;
+if it persists, the bottleneck has moved elsewhere. Only ~4% of the searches
+(terms of 1–2 characters, which produce no trigram) should fall back to
+`Seq Scan`. And the GIN index should make `INSERT` more expensive — if write
+throughput drops, the cost showed up.
 
-**Resultado: duas certas, uma errada.** A ruptura sustentada sumiu e a escrita
-encareceu 3,2×, como previsto. Os 4% de `Seq Scan` viraram 55% — ver abaixo.
+**Result: two right, one wrong.** The sustained breaking point disappeared and
+writes got 3.2× more expensive, as predicted. The 4% of `Seq Scan` turned out to
+be 55% — see below.
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor | vs. abordagem 1 |
+| Metric | Value | vs. approach 1 |
 |---|---|---|
-| **Requisições** | 100.518 | +7,4% |
-| **Sucesso** | 74.875 — **74,49%** | +14,9 p.p. |
-| Falhas | 25.643 | −32,2% |
-| **Usuários criados** | **32.111** | **+27,6%** |
-| Escritas perdidas | 0 | = |
+| **Requests** | 100,518 | +7.4% |
+| **Success** | 74,875 — **74.49%** | +14.9 p.p. |
+| Failures | 25,643 | −32.2% |
+| **People created** | **32,111** | **+27.6%** |
+| Lost writes | 0 | = |
 | **p50** | **1 ms** | = |
 | p75 | 100 ms | −81% |
-| p95 | 1.240 ms | −2% |
-| **p99** | **1.576 ms** | +6% |
-| máx | 1.976 ms | +18% |
-| média | 184 ms | −28% |
-| **Vazão máxima com 100% de sucesso** | **745 req/s** | **+22%** |
-| Vazão com p50 ≤ 20 ms | 700 req/s | +21% |
-| Vazão útil média | 360 req/s | +32% |
-| **Ponto de ruptura** | **t=135s — 459 usuários/s injetados** | **+22 s / +24%** |
-| Início da degradação | t=125s | +18 s |
-| Concorrência no pico | 254 simultâneos | −7% |
-| Vazão nos últimos 60s | 400 req/s (−46% desde o pico) | +69% |
+| p95 | 1,240 ms | −2% |
+| **p99** | **1,576 ms** | +6% |
+| max | 1,976 ms | +18% |
+| mean | 184 ms | −28% |
+| **Peak throughput at 100% success** | **745 req/s** | **+22%** |
+| Throughput at p50 ≤ 20 ms | 700 req/s | +21% |
+| Mean useful throughput | 360 req/s | +32% |
+| **Breaking point** | **t=135s — 459 users/s injected** | **+22 s / +24%** |
+| Degradation starts | t=125s | +18 s |
+| Peak concurrency | 254 simultaneous | −7% |
+| Throughput in the last 60s | 400 req/s (−46% from the peak) | +69% |
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 | Custo no Postgres |
+| Endpoint | Requests | OK | KO | p50 | p99 | Cost in Postgres |
 |---|---|---|---|---|---|---|
-| criação | 54.627 | 37.614 | 17.013 | 1 ms | 1.583 ms | 0,24 ms (Insert) |
-| consulta | 32.111 | 27.649 | 4.462 | 4 ms | 1.569 ms | 0,15 ms (Index Scan) |
-| busca válida | 9.590 | 6.676 | 2.914 | 15 ms | 1.625 ms | **65,10 ms (Seq Scan)** |
-| busca inválida | 4.190 | 2.936 | 1.254 | 1 ms | 5 ms | não toca o banco |
+| criação | 54,627 | 37,614 | 17,013 | 1 ms | 1,583 ms | 0.24 ms (Insert) |
+| consulta | 32,111 | 27,649 | 4,462 | 4 ms | 1,569 ms | 0.15 ms (Index Scan) |
+| busca válida | 9,590 | 6,676 | 2,914 | 15 ms | 1,625 ms | **65.10 ms (Seq Scan)** |
+| busca inválida | 4,190 | 2,936 | 1,254 | 1 ms | 5 ms | never touches the database |
 
-Custos medidos com `EXPLAIN ANALYZE` ao fim da corrida, com a tabela em 32.111
-linhas.
+Costs measured with `EXPLAIN ANALYZE` at the end of the run, with the table at
+32,111 rows.
 
-### Diagnóstico
+### Diagnosis
 
-**A previsão de ~2× estava errada. O ganho medido foi de ~22%.** Vale entender
-por quê, porque o erro é instrutivo.
+**The ~2× prediction was wrong. The measured gain was ~22%.** It is worth
+understanding why, because the error is instructive.
 
-Duplicar as réplicas duplicou o paralelismo — duas filas de profundidade 1 em vez
-de uma. Mas **o scan não ficou mais barato, e a corrida durou mais**: os 22
-segundos extras de sobrevivência foram gastos inserindo linhas na tabela que o
-scan varre.
+Doubling the replicas doubled the parallelism — two queues of depth 1 instead of
+one. But **the scan did not get cheaper, and the run lasted longer**: the extra
+22 seconds of survival were spent inserting rows into the table the scan sweeps.
 
-| | ruptura | linhas na tabela | custo do scan | conexões | capacidade relativa |
+| | breaking point | rows in the table | scan cost | connections | relative capacity |
 |---|---|---|---|---|---|
-| Abordagem 1 | t=113s | 11.401 | ~23 ms | 1 | 1,00× |
-| Abordagem 2 | t=135s | 17.532 | ~36 ms | 2 | **1,28×** |
+| Approach 1 | t=113s | 11,401 | ~23 ms | 1 | 1.00× |
+| Approach 2 | t=135s | 17,532 | ~36 ms | 2 | **1.28×** |
 
-`2 conexões × (23 ms / 36 ms) = 1,28×` — previsto +28%, medido +22%. O
-paralelismo dobrou e o trabalho encareceu 53% no mesmo intervalo, e o que sobrou
-foi a diferença.
+`2 connections × (23 ms / 36 ms) = 1.28×` — predicted +28%, measured +22%. The
+parallelism doubled and the work got 53% more expensive over the same interval,
+and what was left is the difference.
 
-**Esta é a assinatura de um gargalo que não escala horizontalmente:** cada réplica
-adicional aceita mais escritas, cada escrita encarece o `Seq Scan` de todas as
-réplicas. O ganho de adicionar réplicas é sublinear e vai encolhendo. O custo por
-linha do scan, aliás, não mudou — 65,10 ms / 32.111 linhas = 2,0 µs por linha,
-contra 2,3 µs na abordagem 1. Só a tabela cresceu.
+**This is the signature of a bottleneck that does not scale horizontally:** each
+additional replica accepts more writes, and each write makes the `Seq Scan` of
+every replica more expensive. The gain from adding replicas is sublinear and
+keeps shrinking. The per-row cost of the scan, incidentally, did not change —
+65.10 ms / 32,111 rows = 2.0 µs per row, against 2.3 µs in approach 1. Only the
+table grew.
 
-**A parede continua sendo a mesma: os 512 slots do nginx.** A concorrência trava
-em 254 simultâneas — 508 slots dos 512 disponíveis, já que cada requisição
-proxiada ocupa dois. A primeira falha veio em t=135,8s, com ~235 simultâneas.
-
-```
-Seq Scan caro → latência alta → concorrência infla
-              → 512 slots esgotam → nginx recusa
-```
-
-**Novidade: 302 respostas `500`.** Na abordagem 1, 100% das falhas eram invisíveis
-— conexões mortas antes de o nginx alocar qualquer slot. Agora uma fração da
-exaustão ficou visível: o error log traz **298 ocorrências de
-`worker_connections are not enough while connecting to upstream`**, contra 24.163
-do mesmo aviso sem o sufixo. Ou seja, o nginx aceitou o cliente e só então
-descobriu que não tinha slot para o upstream, devolvendo `500`. Mesmo esgotamento,
-dois momentos diferentes.
-
-A reconciliação fecha exata:
+**The wall is still the same: the 512 nginx slots.** Concurrency pins at 254
+simultaneous — 508 of the 512 available slots, since each proxied request takes
+two. The first failure came at t=135.8s, with ~235 simultaneous.
 
 ```
-Gatling KO                        : 25.643
-  ├─ Premature close              : 25.341   ← recusadas no accept
-  └─ status 500                   :    302   ← recusadas ao conectar no upstream
-
-nginx atendeu                     : 75.177 = 74.875 OK + 302 quinhentos
-nunca chegaram ao nginx           : 25.341 = 100.518 − 75.177
-linhas no Postgres                : 32.111 = requisições `consulta`
+expensive Seq Scan → high latency → concurrency inflates
+                   → 512 slots exhausted → nginx refuses
 ```
 
-Zero escritas perdidas: cada `201` virou linha, cada linha virou uma `consulta`.
+**New this round: 302 `500` responses.** In approach 1, 100% of the failures were
+invisible — connections dead before nginx allocated any slot. Now a fraction of
+the exhaustion became visible: the error log carries **298 occurrences of
+`worker_connections are not enough while connecting to upstream`**, against
+24,163 of the same warning without the suffix. That is, nginx accepted the client
+and only then discovered it had no slot for the upstream, answering `500`. Same
+exhaustion, two different moments.
 
-**O sinal de fila continua presente, mas mais fraco.** As médias por endpoint
-ainda convergem apesar de custos reais 400× diferentes — 184 ms na criação,
-199 ms na consulta, 211 ms na busca — mas o p75 da criação caiu de 538 ms para
-94 ms. O penhasco entre "fila vazia" e "fila cheia" continua lá; só ficou mais
-raso, porque agora há duas filas para cair.
+The reconciliation closes exactly:
 
-### Próximo passo
+```
+Gatling KO                        : 25,643
+  ├─ Premature close              : 25,341   ← refused at accept
+  └─ status 500                   :    302   ← refused when connecting upstream
 
-A abordagem 2 comprou tempo sem tocar na causa. As duas correções restantes
-continuam valendo, e agora com uma previsão mais calibrada:
+nginx served                      : 75,177 = 74,875 OK + 302 five-hundreds
+never reached nginx               : 25,341 = 100,518 − 75,177
+rows in Postgres                  : 32,111 = `consulta` requests
+```
 
-- **Pool de conexões** — mesma natureza da réplica: paraleliza sem baratear.
-  Deve render mais que as réplicas (dezenas de conexões, não duas), mas esbarra
-  no mesmo teto móvel: quanto mais escritas passam, mais caro fica cada scan.
-  Previsão: ganho sublinear no número de conexões, ruptura empurrada para
-  t≈150–170s, parede do nginx ainda presente.
-- **Índice `pg_trgm` + GIN** — a única correção que ataca o `Seq Scan` em vez de
-  paralelizá-lo. Previsão: é a que deve mudar a forma da curva, não só deslocá-la.
+Zero lost writes: every `201` became a row, every row became a `consulta`.
+
+**The queueing signal is still there, but weaker.** The per-endpoint means still
+converge despite real costs that differ by 400× — 184 ms on creation, 199 ms on
+fetch, 211 ms on search — but the p75 of creation dropped from 538 ms to 94 ms.
+The cliff between "empty queue" and "full queue" is still there; it just got
+shallower, because now there are two queues to fall into.
+
+### Next step
+
+Approach 2 bought time without touching the cause. The two remaining fixes still
+apply, and now with a better calibrated prediction:
+
+- **Connection pool** — same nature as the replica: it parallelizes without
+  making anything cheaper. It should yield more than the replicas (dozens of
+  connections, not two), but it runs into the same moving ceiling: the more
+  writes get through, the more expensive each scan becomes. Prediction:
+  sublinear gain in the number of connections, breaking point pushed to
+  t≈150–170s, nginx wall still present.
+- **`pg_trgm` + GIN index** — the only fix that attacks the `Seq Scan` instead of
+  parallelizing it. Prediction: this is the one that should change the shape of
+  the curve, not just its position.
 
 ---
 
-## Abordagem 3 — conexão única, 1 réplica, índice GIN + `pg_trgm`
+## Approach 3 — single connection, 1 replica, GIN + `pg_trgm` index
 
 ```
 nginx (1 worker, 512 slots)
-  └── api1 ── 1 processo Node ── 1 conexão ── Postgres (GIN trigram)
+  └── api1 ── 1 Node process ── 1 connection ── Postgres (GIN trigram)
 ```
 
-Volta à topologia da abordagem 1 — uma réplica, uma conexão — para isolar a única
-variável que interessa agora: **o índice**. Em vez de paralelizar o `Seq Scan`, o
-objetivo é fazê-lo desaparecer.
+Back to the topology of approach 1 — one replica, one connection — to isolate the
+only variable that matters now: **the index**. Instead of parallelizing the
+`Seq Scan`, the goal is to make it disappear.
 
-O `ILIKE '%termo%'` com curinga à esquerda não usa B-tree, mas usa **índice de
-trigramas**. Como `ARRAY_TO_STRING` não é `IMMUTABLE`, o Postgres recusa indexar a
-expressão diretamente; a solução é materializar os três campos buscáveis em uma
-coluna gerada e indexar essa coluna:
+`ILIKE '%term%'` with a leading wildcard cannot use a B-tree, but it can use a
+**trigram index**. Since `ARRAY_TO_STRING` is not `IMMUTABLE`, Postgres refuses to
+index the expression directly; the fix is to materialize the three searchable
+fields into a generated column and index that column:
 
 ```sql
 CREATE EXTENSION pg_trgm;
@@ -319,338 +332,343 @@ busca TEXT GENERATED ALWAYS AS (busca_texto(apelido, nome, stack)) STORED
 CREATE INDEX idx_pessoas_busca ON pessoas USING GIN (busca gin_trgm_ops);
 ```
 
-A query de busca deixa de ter três `OR` e passa a `WHERE busca ILIKE $1`.
+The search query drops its three `OR`s and becomes `WHERE busca ILIKE $1`.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Client` — uma conexão aberta no boot |
-| Réplicas da API | 1 |
-| Load balancer | nginx, upstream único |
-| Limites de CPU/memória | nenhum |
-| Índices | PK, `UNIQUE` de `apelido` e **GIN `gin_trgm_ops` sobre `busca`** |
+| Database strategy | `pg.Client` — one connection opened at boot |
+| API replicas | 1 |
+| Load balancer | nginx, single upstream |
+| CPU/memory limits | none |
+| Indexes | primary key, `UNIQUE` on `apelido` and **GIN `gin_trgm_ops` over `busca`** |
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor | vs. abordagem 1 |
+| Metric | Value | vs. approach 1 |
 |---|---|---|
-| **Requisições** | 111.263 | +18,9% |
-| **Sucesso** | 104.160 — **93,62%** | **+34,0 p.p.** |
-| Falhas | 7.103 | −81,2% |
-| **Usuários criados** | **42.851** | **+70,3%** |
-| Escritas perdidas | 0 | = |
+| **Requests** | 111,263 | +18.9% |
+| **Success** | 104,160 — **93.62%** | **+34.0 p.p.** |
+| Failures | 7,103 | −81.2% |
+| **People created** | **42,851** | **+70.3%** |
+| Lost writes | 0 | = |
 | **p50** | **1 ms** | = |
 | p75 | 10 ms | −98% |
 | p95 | 517 ms | −59% |
 | **p99** | **733 ms** | **−51%** |
-| máx | 1.014 ms | −40% |
-| média | 64 ms | −75% |
-| **Vazão máxima com 100% de sucesso** | **1.257 req/s** | **+106%** |
-| Vazão com p50 ≤ 20 ms | 1.399 req/s | +142% |
-| Vazão útil média | 503 req/s | +85% |
-| **Primeira falha** | **t=137s — 467 usuários/s** | +24 s / +26% |
-| Ruptura sustentada | **não houve** | — |
-| Concorrência no pico | 258 simultâneos | −5% |
-| Vazão nos últimos 60s | 866 req/s (−38% desde o pico) | +265% |
+| max | 1,014 ms | −40% |
+| mean | 64 ms | −75% |
+| **Peak throughput at 100% success** | **1,257 req/s** | **+106%** |
+| Throughput at p50 ≤ 20 ms | 1,399 req/s | +142% |
+| Mean useful throughput | 503 req/s | +85% |
+| **First failure** | **t=137s — 467 users/s** | +24 s / +26% |
+| Sustained breaking point | **none** | — |
+| Peak concurrency | 258 simultaneous | −5% |
+| Throughput in the last 60s | 866 req/s (−38% from the peak) | +265% |
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 | Custo no Postgres |
+| Endpoint | Requests | OK | KO | p50 | p99 | Cost in Postgres |
 |---|---|---|---|---|---|---|
-| criação | 54.632 | 50.241 | 4.391 | 1 ms | 754 ms | 0,77 ms (Insert + GIN) |
-| consulta | 42.851 | 41.245 | 1.606 | 1 ms | 693 ms | 0,15 ms (Index Scan) |
-| busca válida | 9.590 | 8.812 | 778 | 6 ms | 765 ms | **0,21 ms (Bitmap Index Scan)** |
-| busca inválida | 4.190 | 3.862 | 328 | 1 ms | 6 ms | não toca o banco |
+| criação | 54,632 | 50,241 | 4,391 | 1 ms | 754 ms | 0.77 ms (Insert + GIN) |
+| consulta | 42,851 | 41,245 | 1,606 | 1 ms | 693 ms | 0.15 ms (Index Scan) |
+| busca válida | 9,590 | 8,812 | 778 | 6 ms | 765 ms | **0.21 ms (Bitmap Index Scan)** |
+| busca inválida | 4,190 | 3,862 | 328 | 1 ms | 6 ms | never touches the database |
 
-Custos medidos com `EXPLAIN ANALYZE` ao fim da corrida, com a tabela em 42.851
-linhas.
+Costs measured with `EXPLAIN ANALYZE` at the end of the run, with the table at
+42,851 rows.
 
-### Diagnóstico
+### Diagnosis
 
-**O gargalo foi eliminado, e desta vez a curva mudou de forma — não só de lugar.**
+**The bottleneck was eliminated, and this time the curve changed shape — not just
+position.**
 
-A busca custava 63,08 ms na abordagem 2. Agora custa **0,21 ms**, com uma tabela
-33% maior. É o fim do `Seq Scan` como fator dominante.
+The search cost 63.08 ms in approach 2. Now it costs **0.21 ms**, with a table 33%
+larger. That is the end of the `Seq Scan` as the dominant factor.
 
-Mas o número que importa não é esse. É este:
+But that is not the number that matters. This is:
 
-| Terço da corrida | Abordagem 1 | Abordagem 2 | **Abordagem 3** |
+| Third of the run | Approach 1 | Approach 2 | **Approach 3** |
 |---|---|---|---|
-| início (t=0–69s) | 116 req/s | 128 req/s | **110 req/s** |
-| meio (t=69–138s) | 448 req/s | 561 req/s | **546 req/s** |
-| fim (t=138–207s) | 253 req/s | 391 req/s | **854 req/s** |
+| start (t=0–69s) | 116 req/s | 128 req/s | **110 req/s** |
+| middle (t=69–138s) | 448 req/s | 561 req/s | **546 req/s** |
+| end (t=138–207s) | 253 req/s | 391 req/s | **854 req/s** |
 
-Nas duas primeiras abordagens o último terço era **o pior** — a vazão desabava
-justamente quando a carga era maior, porque cada linha inserida encarecia todas as
-buscas seguintes. Aqui o último terço é o **melhor**. A capacidade parou de decair
-durante a corrida.
+In the first two approaches the last third was **the worst** — throughput
+collapsed exactly when the load was highest, because every inserted row made all
+subsequent searches more expensive. Here the last third is the **best**. Capacity
+stopped decaying during the run.
 
-Isso se confirma no ponto mais improvável: **a vazão máxima com 100% de sucesso,
-1.257 req/s, aconteceu em t=205s** — o penúltimo segundo do teste, com a tabela
-cheia. Nas abordagens 1 e 2 o pico limpo aconteceu antes da quebra e nunca mais
-voltou.
+This is confirmed at the most unlikely point: **the peak throughput at 100%
+success, 1,257 req/s, happened at t=205s** — the second-to-last second of the
+test, with a full table. In approaches 1 and 2 the clean peak happened before the
+break and never came back.
 
-**A falha deixou de ser colapso e virou serrilhado.** Não houve ruptura
-sustentada — o script que procura 6 segundos consecutivos de falha não achou
-nenhum:
+**Failure stopped being a collapse and became a sawtooth.** There was no sustained
+breaking point — the script that looks for 6 consecutive seconds of failure found
+none:
 
-| | Abordagem 1 | Abordagem 2 | **Abordagem 3** |
+| | Approach 1 | Approach 2 | **Approach 3** |
 |---|---|---|---|
-| segundos com falha | 95 de 208 | 73 de 208 | **33 de 207 (16%)** |
-| maior sequência consecutiva | até o fim | até o fim | **4 segundos** |
-| recupera para zero falhas? | não | não | **sim, até 10 s limpos seguidos** |
+| seconds with failures | 95 of 208 | 73 of 208 | **33 of 207 (16%)** |
+| longest consecutive streak | until the end | until the end | **4 seconds** |
+| recovers to zero failures? | no | no | **yes, up to 10 clean seconds in a row** |
 
-Nos segundos limpos depois da primeira falha, o sistema entregou **968 req/s em
-média**. Ou seja: ele satura por 2–4 segundos, esvazia a fila e volta ao normal. O
-p50 nunca ficou acima de 20 ms por 5 segundos seguidos.
+In the clean seconds after the first failure, the system delivered **968 req/s on
+average**. That is: it saturates for 2–4 seconds, drains the queue, and returns to
+normal. The p50 never stayed above 20 ms for 5 seconds in a row.
 
-### A previsão dos 4% errou por muito
+### The 4% prediction was off by a lot
 
-Registrei que apenas 4% das buscas cairiam em `Seq Scan` (termos de 1–2
-caracteres, que não geram trigrama). O `pg_stat_user_tables` diz outra coisa:
+I recorded that only 4% of the searches would fall back to `Seq Scan` (terms of
+1–2 characters, which produce no trigram). `pg_stat_user_tables` says otherwise:
 
 ```
-seq_scan  : 4.868      ← 55% das buscas
-idx_scan  : 3.950      ← 45% das buscas
+seq_scan  : 4,868      ← 55% of the searches
+idx_scan  : 3,950      ← 45% of the searches
 ```
 
-**O motivo não é limitação do índice, é decisão de custo do planner.** Quando o
-termo é comum, o `LIMIT 50` se satisfaz depois de algumas centenas de linhas, e
-varrer é mais barato que consultar o índice. O Postgres escolhe o plano por
-estimativa de seletividade, não pelo comprimento do termo.
+**The reason is not a limitation of the index, it is the planner's cost
+decision.** When the term is common, the `LIMIT 50` is satisfied after a few
+hundred rows, and scanning is cheaper than consulting the index. Postgres picks
+the plan by selectivity estimate, not by term length.
 
-E funciona: mesmo com metade das buscas varrendo, o p99 da busca caiu de 1.518 ms
-para 765 ms. O índice não precisou atender todas as buscas — precisou atender as
-**caras**, que eram exatamente as de termo raro que varriam a tabela inteira.
+And it works: even with half the searches scanning, the search p99 dropped from
+1,518 ms to 765 ms. The index did not have to serve every search — it had to
+serve the **expensive** ones, which were exactly the rare-term searches that swept
+the entire table.
 
-### O preço pago
+### The price paid
 
-Ambos os custos previstos apareceram, e ambos valeram a pena:
+Both predicted costs showed up, and both were worth it:
 
-| | Antes | Depois |
+| | Before | After |
 |---|---|---|
-| custo do `INSERT` | 0,24 ms | **0,77 ms** (3,2×) |
-| espaço em disco | — | **19 MB** (10× a PK, que tem 1,8 MB) |
+| `INSERT` cost | 0.24 ms | **0.77 ms** (3.2×) |
+| disk space | — | **19 MB** (10× the primary key, which takes 1.8 MB) |
 
-A escrita ficou 3× mais cara e ainda assim as criações bem-sucedidas subiram de
-29.473 para **50.241**. O que se ganhou em não bloquear a fila pagou o custo de
-manutenção do índice com folga.
+Writes got 3× more expensive and successful creations still went from 29,473 to
+**50,241**. What was gained by not blocking the queue paid for the index
+maintenance cost with room to spare.
 
-### A parede continua sendo o nginx
+### The wall is still nginx
 
-Os 7.103 KOs têm uma única mensagem, `Premature close`, e o error log traz 6.762
-avisos de `worker_connections are not enough` — nenhum deles com o sufixo
-`while connecting to upstream`, e zero respostas `500`. A concorrência ainda
-encosta em 258 simultâneas (516 slots dos 512).
+The 7,103 KOs carry a single message, `Premature close`, and the error log brings
+6,762 `worker_connections are not enough` warnings — none of them with the
+`while connecting to upstream` suffix, and zero `500` responses. Concurrency still
+touches 258 simultaneous (516 of the 512 slots).
 
-A diferença é a duração: antes a concorrência travava no teto e ficava lá pelos 90
-segundos restantes; agora ela encosta, o sistema drena e ela volta a zero.
+The difference is duration: before, concurrency pinned at the ceiling and stayed
+there for the remaining 90 seconds; now it touches, the system drains, and it
+falls back to zero.
 
-A reconciliação fecha exata:
+The reconciliation closes exactly:
 
 ```
-Gatling KO        : 7.103 = 111.263 − 104.160, todos Premature close
-nginx access log  : 104.160 OK (+12 linhas malformadas)
-status 201        : 42.851 = linhas no Postgres = requisições `consulta`
-status 400        :  4.183 = 3.862 do `busca inválida` + 321 do `criação`
+Gatling KO        : 7,103 = 111,263 − 104,160, all Premature close
+nginx access log  : 104,160 OK (+12 malformed lines)
+status 201        : 42,851 = rows in Postgres = `consulta` requests
+status 400        :  4,183 = 3,862 from `busca inválida` + 321 from `criação`
 ```
 
-### Próximo passo
+### Next step
 
-Com o `Seq Scan` fora do caminho, sobraram dois candidatos a gargalo, e eles agora
-podem ser medidos separadamente:
+With the `Seq Scan` out of the way, two bottleneck candidates remain, and they can
+now be measured separately:
 
-- **A conexão única** — continua serializando tudo. Um pool deve atacar os picos
-  de 2–4 segundos que ainda saturam o nginx.
-- **Os 512 slots do nginx** — agora que a latência caiu, é possível que o teto
-  seja atingido por vazão legítima, não por fila inflada. É a primeira vez que
-  faz sentido mexer na configuração do nginx.
+- **The single connection** — still serializes everything. A pool should attack
+  the 2–4 second spikes that still saturate nginx.
+- **The 512 nginx slots** — now that latency has dropped, the ceiling may be
+  reached by legitimate throughput rather than by an inflated queue. It is the
+  first time it makes sense to touch the nginx configuration.
 
-E fica pendente a **abordagem de conformidade**: 2 réplicas e limites de 1,5 CPU /
-3,0 GB, que é o que as regras da Rinha exigem e que nenhuma das três abordagens
-até aqui respeitou.
+And the **compliance approach** is still pending: 2 replicas and limits of
+1.5 CPU / 3.0 GB, which is what the Rinha rules require and which none of the
+three approaches so far has respected.
 
 ---
 
-## Abordagem 4 — 2 réplicas, índice GIN + `pg_trgm`
+## Approach 4 — 2 replicas, GIN + `pg_trgm` index
 
 ```
 nginx (1 worker, 512 slots, round-robin)
-  ├── api1 ── 1 processo Node ── 1 conexão ─┐
-  └── api2 ── 1 processo Node ── 1 conexão ─┴── Postgres (GIN trigram)
+  ├── api1 ── 1 Node process ── 1 connection ─┐
+  └── api2 ── 1 Node process ── 1 connection ─┴── Postgres (GIN trigram)
 ```
 
-Mantém o índice da abordagem 3 e volta a segunda réplica. Uma variável mudou.
+Keeps the index from approach 3 and brings back the second replica. One variable
+changed.
 
-Esta abordagem é o **teste do diagnóstico da abordagem 2**. Lá, duplicar as
-réplicas rendeu apenas +22% em vez dos 2× esperados, e a explicação registrada foi
-que o `Seq Scan` encarecia enquanto a corrida durava — o paralelismo dobrava, mas
-o trabalho crescia junto. Se essa explicação estiver certa, agora que o `Seq Scan`
-saiu do caminho **a segunda réplica deve render muito mais do que rendeu antes**.
+This approach is the **test of approach 2's diagnosis**. There, doubling the
+replicas yielded only +22% instead of the expected 2×, and the recorded
+explanation was that the `Seq Scan` got more expensive as the run went on — the
+parallelism doubled, but the work grew alongside it. If that explanation is right,
+now that the `Seq Scan` is out of the way **the second replica should yield much
+more than it did before**.
 
-É também a primeira abordagem que cumpre a exigência da Rinha de duas instâncias
-da API. Continua fora das regras nos limites de CPU e memória.
+It is also the first approach that satisfies the Rinha requirement of two API
+instances. It still violates the rules on CPU and memory limits.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Client` — uma conexão por processo |
-| Réplicas da API | 2 |
-| Load balancer | nginx, upstream round-robin |
-| Limites de CPU/memória | nenhum |
-| Índices | PK, `UNIQUE` de `apelido` e GIN `gin_trgm_ops` sobre `busca` |
+| Database strategy | `pg.Client` — one connection per process |
+| API replicas | 2 |
+| Load balancer | nginx, round-robin upstream |
+| CPU/memory limits | none |
+| Indexes | primary key, `UNIQUE` on `apelido` and GIN `gin_trgm_ops` over `busca` |
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor | vs. abordagem 3 |
+| Metric | Value | vs. approach 3 |
 |---|---|---|
-| **Requisições** | 114.963 | +3,3% |
-| **Sucesso** | 114.914 — **99,96%** | **+6,3 p.p.** |
-| Falhas | **49** | **−99,3%** |
-| **Usuários criados** | **46.549** | +8,6% |
-| Escritas perdidas | 0 | = |
+| **Requests** | 114,963 | +3.3% |
+| **Success** | 114,914 — **99.96%** | **+6.3 p.p.** |
+| Failures | **49** | **−99.3%** |
+| **People created** | **46,549** | +8.6% |
+| Lost writes | 0 | = |
 | **p50** | **1 ms** | = |
 | p75 | 2 ms | −80% |
 | p95 | 45 ms | −91% |
 | **p99** | **212 ms** | **−71%** |
-| máx | 377 ms | −63% |
-| média | 10 ms | −84% |
-| **Vazão máxima com 100% de sucesso** | **1.256 req/s** | = |
-| Vazão com p50 ≤ 20 ms | 1.256 req/s | −10% |
-| Vazão útil média | 555 req/s | +10% |
-| **Segundos com falha** | **1 de 207** | 33 de 207 |
-| Ruptura sustentada | não houve | não houve |
-| Concorrência mediana (último terço) | **2 simultâneos** | 20 |
-| Concorrência no pico | 250 simultâneos | 258 |
-| Vazão nos últimos 60s | 1.030 req/s (−18% do pico) | +19% |
+| max | 377 ms | −63% |
+| mean | 10 ms | −84% |
+| **Peak throughput at 100% success** | **1,256 req/s** | = |
+| Throughput at p50 ≤ 20 ms | 1,256 req/s | −10% |
+| Mean useful throughput | 555 req/s | +10% |
+| **Seconds with failures** | **1 of 207** | 33 of 207 |
+| Sustained breaking point | none | none |
+| Median concurrency (last third) | **2 simultaneous** | 20 |
+| Peak concurrency | 250 simultaneous | 258 |
+| Throughput in the last 60s | 1,030 req/s (−18% from the peak) | +19% |
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 | Custo no Postgres |
+| Endpoint | Requests | OK | KO | p50 | p99 | Cost in Postgres |
 |---|---|---|---|---|---|---|
-| criação | 54.634 | 54.604 | 30 | 1 ms | 217 ms | 0,82 ms (Insert + GIN) |
-| consulta | 46.549 | 46.535 | 14 | 1 ms | 207 ms | 0,15 ms (Index Scan) |
-| busca válida | 9.590 | 9.586 | 4 | 5 ms | 235 ms | 0,13 ms (Bitmap Index Scan) |
-| busca inválida | 4.190 | 4.189 | 1 | 1 ms | 6 ms | não toca o banco |
+| criação | 54,634 | 54,604 | 30 | 1 ms | 217 ms | 0.82 ms (Insert + GIN) |
+| consulta | 46,549 | 46,535 | 14 | 1 ms | 207 ms | 0.15 ms (Index Scan) |
+| busca válida | 9,590 | 9,586 | 4 | 5 ms | 235 ms | 0.13 ms (Bitmap Index Scan) |
+| busca inválida | 4,190 | 4,189 | 1 | 1 ms | 6 ms | never touches the database |
 
-Custos medidos com `EXPLAIN ANALYZE` ao fim da corrida, com a tabela em 46.549
-linhas.
+Costs measured with `EXPLAIN ANALYZE` at the end of the run, with the table at
+46,549 rows.
 
-### Diagnóstico
+### Diagnosis
 
-**99,96% de sucesso, com falhas concentradas em um único segundo da corrida.**
+**99.96% success, with the failures concentrated in a single second of the run.**
 
-As 49 falhas aconteceram todas em t=171s, num pico isolado onde a concorrência
-saltou para 239 simultâneas (478 slots). Todas com a mesma mensagem,
-`Premature close`, e os avisos de `worker_connections` no nginx caíram de 6.762
-para **31**. Nos outros 206 segundos, zero falhas.
+All 49 failures happened at t=171s, in an isolated spike where concurrency jumped
+to 239 simultaneous (478 slots). All with the same message, `Premature close`, and
+the `worker_connections` warnings in nginx dropped from 6,762 to **31**. In the
+other 206 seconds, zero failures.
 
-O p50 nunca passou de 125 ms em segundo nenhum — contra 759 ms na abordagem 3.
+The p50 never went above 125 ms in any second — against 759 ms in approach 3.
 
-### A previsão acertou, e por margem maior
+### The prediction was right, and by a wider margin
 
-Previ que a concorrência cairia para a faixa de 130 simultâneas, cerca de metade
-do teto do nginx. O resultado foi bem melhor:
+I predicted concurrency would drop to around 130 simultaneous, about half the
+nginx ceiling. The result was much better:
 
-| Último terço da corrida (t=138–207s) | Abordagem 3 | **Abordagem 4** |
+| Last third of the run (t=138–207s) | Approach 3 | **Approach 4** |
 |---|---|---|
-| concorrência mediana | 20 | **2** |
-| concorrência média | 98 | **14** |
-| concorrência p95 | 255 | **90** |
-| slots usados (mediana) | 40 de 512 | **4 de 512** |
-| p50 mediano por segundo | 11,5 ms | **1,0 ms** |
-| pior segundo (p50) | 759 ms | **125 ms** |
+| median concurrency | 20 | **2** |
+| mean concurrency | 98 | **14** |
+| p95 concurrency | 255 | **90** |
+| slots used (median) | 40 of 512 | **4 of 512** |
+| median per-second p50 | 11.5 ms | **1.0 ms** |
+| worst second (p50) | 759 ms | **125 ms** |
 
-A segunda fila drenando em paralelo não reduziu a concorrência pela metade — ela
-a reduziu em **10×**. O motivo é que `L = λ × W` se retroalimenta: quando a fila
-esvazia mais rápido, a latência cai, e latência menor significa menos requisições
-coexistindo, o que faz a fila esvaziar ainda mais rápido. O efeito é multiplicativo
-enquanto o sistema estiver fora da saturação.
+The second queue draining in parallel did not halve concurrency — it cut it by
+**10×**. The reason is that `L = λ × W` feeds back on itself: when the queue
+drains faster, latency drops, and lower latency means fewer requests coexisting,
+which makes the queue drain faster still. The effect is multiplicative as long as
+the system stays out of saturation.
 
-### A pergunta dos 2× não pôde ser respondida
+### The 2× question could not be answered
 
-A abordagem 4 era o teste do diagnóstico da abordagem 2: sem o `Seq Scan`
-encarecendo, a segunda réplica deveria render perto de 2× em vez dos 1,28×
-medidos lá. **O teste não permitiu medir isso.**
+Approach 4 was the test of approach 2's diagnosis: without the `Seq Scan` getting
+more expensive, the second replica should yield close to 2× instead of the 1.28×
+measured there. **The test did not allow that to be measured.**
 
-| | Abordagem 3 | Abordagem 4 |
+| | Approach 3 | Approach 4 |
 |---|---|---|
-| Vazão máxima com 100% de sucesso | 1.257 req/s | 1.256 req/s |
-| Segundo em que aconteceu | t=205s | t=205s |
-| Injeção nesse segundo | 740 u/s (máximo) | 740 u/s (máximo) |
+| Peak throughput at 100% success | 1,257 req/s | 1,256 req/s |
+| Second it happened | t=205s | t=205s |
+| Injection in that second | 740 u/s (maximum) | 740 u/s (maximum) |
 
-As duas abordagens chegaram ao mesmo número, no mesmo segundo — o **último** da
-corrida, quando a rampa do Gatling atinge seu teto de 740 usuários/s. Isso não é
-coincidência nem empate: as duas entregaram tudo o que foi oferecido.
+Both approaches reached the same number, in the same second — the **last** one of
+the run, when the Gatling ramp hits its ceiling of 740 users/s. That is neither
+coincidence nor a tie: both delivered everything that was offered.
 
-**O limitador da vazão deixou de ser o sistema e passou a ser o teste.** A partir
-da abordagem 3, "vazão máxima com 100% de sucesso" parou de medir capacidade e
-passou a medir a rampa do Gatling. É por isso que o ganho da réplica aparece na
-tabela de concorrência e latência, e não na de vazão: sobrou capacidade que a
-carga não chegou a exercitar.
+**The throughput limiter stopped being the system and became the test.** From
+approach 3 onward, "peak throughput at 100% success" stopped measuring capacity
+and started measuring the Gatling ramp. That is why the replica's gain shows up in
+the concurrency and latency tables and not in the throughput one: there was
+capacity left over that the load never exercised.
 
-Isso vale para a **vazão**, não para o sistema inteiro. A [abordagem
-6](#abordagem-6--pool-de-conexões-pgpool) mostrou depois que ainda havia um
-gargalo real aqui — os picos de concorrência da conexão única, que levavam os
-slots do nginx a 500 de 512 e produziram as 49 falhas. Ele não aparecia na vazão
-porque não limitava a vazão; limitava a cauda.
+This applies to **throughput**, not to the whole system.
+[Approach 6](#approach-6--connection-pool-pgpool) later showed there was still a
+real bottleneck here — the concurrency spikes of the single connection, which
+drove the nginx slots to 500 of 512 and produced the 49 failures. It did not show
+up in throughput because it did not limit throughput; it limited the tail.
 
-A vazão por terço mostra o mesmo de outro ângulo — o sistema acompanha a carga do
-início ao fim, sem inflexão:
+Throughput per third shows the same thing from another angle — the system tracks
+the load from start to finish, with no inflection:
 
-| Terço | Abord. 1 | Abord. 2 | Abord. 3 | **Abord. 4** |
+| Third | Appr. 1 | Appr. 2 | Appr. 3 | **Appr. 4** |
 |---|---|---|---|---|
-| início | 116 req/s | 128 req/s | 110 req/s | **111 req/s** |
-| meio | 448 req/s | 561 req/s | 546 req/s | **551 req/s** |
-| fim | 253 req/s | 391 req/s | 854 req/s | **1.003 req/s** |
+| start | 116 req/s | 128 req/s | 110 req/s | **111 req/s** |
+| middle | 448 req/s | 561 req/s | 546 req/s | **551 req/s** |
+| end | 253 req/s | 391 req/s | 854 req/s | **1,003 req/s** |
 
-### O índice continua com metade das buscas em `Seq Scan`
+### The index still has half the searches on `Seq Scan`
 
-Mesmo padrão da abordagem 3, e pelo mesmo motivo — o planner escolhe varrer quando
-o termo é comum e o `LIMIT 50` se satisfaz cedo:
-
-```
-seq_scan            : 4.914   (51%)
-idx_pessoas_busca   : 4.678   (49%)   —  20 MB
-```
-
-O custo do `INSERT` ficou em 0,82 ms, contra 0,24 ms sem o índice.
-
-A reconciliação fecha exata:
+Same pattern as approach 3, and for the same reason — the planner chooses to scan
+when the term is common and the `LIMIT 50` is satisfied early:
 
 ```
-Gatling KO   :     49, todos Premature close, todos em t=171s
-status 201   : 46.549 = linhas no Postgres = requisições `consulta`
-status 400   :  4.537 = 4.189 do `busca inválida` + 348 do `criação`
-status 200   : 56.124 = 56.121 do teste + 3 chamadas de `contagem-pessoas`
+seq_scan            : 4,914   (51%)
+idx_pessoas_busca   : 4,678   (49%)   —  20 MB
 ```
 
-### Próximo passo
+The `INSERT` cost settled at 0.82 ms, against 0.24 ms without the index.
 
-O sistema saiu da zona em que este teste consegue medi-lo. Para voltar a ter um
-gargalo observável, o caminho é **aplicar as restrições da Rinha**: 1,5 CPU e
-3,0 GB distribuídos entre os quatro contêineres.
+The reconciliation closes exactly:
 
-Com 1,5 CPU no total em vez das 12 da máquina, o gargalo deve reaparecer — e
-provavelmente em outro lugar, já que nem o `Seq Scan` nem a fila de conexão única
-são mais os dominantes. É também a primeira configuração que seria válida pelas
-regras do torneio.
+```
+Gatling KO   :     49, all Premature close, all at t=171s
+status 201   : 46,549 = rows in Postgres = `consulta` requests
+status 400   :  4,537 = 4,189 from `busca inválida` + 348 from `criação`
+status 200   : 56,124 = 56,121 from the test + 3 `contagem-pessoas` calls
+```
+
+### Next step
+
+The system left the zone where this test can measure it. To get an observable
+bottleneck back, the way forward is to **apply the Rinha restrictions**: 1.5 CPU
+and 3.0 GB split across the four containers.
+
+With 1.5 CPU in total instead of the machine's 12, the bottleneck should
+reappear — and probably somewhere else, since neither the `Seq Scan` nor the
+single-connection queue is dominant any more. It is also the first configuration
+that would be valid under the tournament rules.
 
 ---
 
-## Abordagem 5 — conexão por requisição (`try/finally`)
+## Approach 5 — connection per request (`try/finally`)
 
 ```
 nginx (round-robin)
   ├── api1 ──┐
-  └── api2 ──┴── N conexões efêmeras ── Postgres (GIN trigram, max_connections=100)
+  └── api2 ──┴── N ephemeral connections ── Postgres (GIN trigram, max_connections=100)
 ```
 
-Mantém tudo da abordagem 4 e troca só a estratégia de conexão. Em vez de uma
-conexão aberta no boot e reutilizada para sempre, cada chamada de `query()` abre
-sua própria conexão e a fecha no `finally`:
+Keeps everything from approach 4 and changes only the connection strategy.
+Instead of one connection opened at boot and reused forever, each `query()` call
+opens its own connection and closes it in the `finally`:
 
 ```js
 export async function query(text, params) {
@@ -665,185 +683,189 @@ export async function query(text, params) {
 }
 ```
 
-Duas consequências opostas, e é a tensão entre elas que o teste vai resolver:
+Two opposite consequences, and the tension between them is what the test will
+settle:
 
-- **Some o head-of-line blocking.** Não existe mais fila única: cada requisição
-  tem sua própria conexão e as queries rodam de verdade em paralelo.
-- **Cada requisição paga para abrir e fechar uma conexão** — handshake TCP,
-  autenticação e um processo novo forkado pelo Postgres.
+- **Head-of-line blocking disappears.** There is no single queue any more: each
+  request has its own connection and the queries genuinely run in parallel.
+- **Each request pays to open and close a connection** — TCP handshake,
+  authentication, and a fresh process forked by Postgres.
 
-O `await` antes do `client.query` é obrigatório. Sem ele, o `finally` executaria
-antes de a query resolver e fecharia a conexão no meio do caminho.
+The `await` before `client.query` is mandatory. Without it, the `finally` would
+run before the query resolved and would close the connection midway.
 
-**Sobre o `catch`:** deixei o erro propagar em vez de capturá-lo aqui. O handler
-do `POST /pessoas` já tem o seu próprio `catch`, e é ele que transforma violação
-de `UNIQUE` em `422`. Um `catch` que engolisse o erro dentro do `query()` quebraria
-esse caminho — o handler receberia `undefined` e estouraria ao ler
-`result.rows[0]`.
+**About the `catch`:** I let the error propagate instead of catching it here. The
+`POST /pessoas` handler already has its own `catch`, and that is what turns a
+`UNIQUE` violation into a `422`. A `catch` that swallowed the error inside
+`query()` would break that path — the handler would receive `undefined` and blow
+up reading `result.rows[0]`.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Client` — uma conexão por requisição, fechada no `finally` |
-| Réplicas da API | 2 |
-| Load balancer | nginx, upstream round-robin |
-| Limites de CPU/memória | nenhum |
-| Índices | PK, `UNIQUE` de `apelido` e GIN `gin_trgm_ops` sobre `busca` |
-| `max_connections` do Postgres | 100 (padrão) |
+| Database strategy | `pg.Client` — one connection per request, closed in the `finally` |
+| API replicas | 2 |
+| Load balancer | nginx, round-robin upstream |
+| CPU/memory limits | none |
+| Indexes | primary key, `UNIQUE` on `apelido` and GIN `gin_trgm_ops` over `busca` |
+| Postgres `max_connections` | 100 (default) |
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor | vs. abordagem 4 |
+| Metric | Value | vs. approach 4 |
 |---|---|---|
-| **Requisições** | 114.085 | −0,8% |
-| **Sucesso** | 113.521 — **99,51%** | −0,45 p.p. |
-| Falhas | **564** | +1.051% |
-| **Usuários criados** | **45.660** | **−889** |
-| Escritas perdidas silenciosamente | **71** | 0 |
+| **Requests** | 114,085 | −0.8% |
+| **Success** | 113,521 — **99.51%** | −0.45 p.p. |
+| Failures | **564** | +1,051% |
+| **People created** | **45,660** | **−889** |
+| Silently lost writes | **71** | 0 |
 | **p50** | **5 ms** | **5×** |
 | p75 | 14 ms | 7× |
-| p95 | 103 ms | 2,3× |
+| p95 | 103 ms | 2.3× |
 | **p99** | **203 ms** | −4% |
-| máx | 679 ms | +80% |
-| média | 21 ms | 2,1× |
-| **Vazão máxima com 100% de sucesso** | 1.263 req/s | = |
-| Vazão útil média | 548 req/s | −1% |
-| **Segundos com falha** | **11 de 207** | 1 de 207 |
-| Primeira falha | t=187s — 664 usuários/s | t=171s |
-| Concorrência mediana (último terço) | 9 simultâneos | 2 |
-| Concorrência no pico | **198 simultâneos** | 250 |
-| Avisos de `worker_connections` no nginx | **0** | 31 |
-| Vazão nos últimos 60s | 1.011 req/s | −2% |
+| max | 679 ms | +80% |
+| mean | 21 ms | 2.1× |
+| **Peak throughput at 100% success** | 1,263 req/s | = |
+| Mean useful throughput | 548 req/s | −1% |
+| **Seconds with failures** | **11 of 207** | 1 of 207 |
+| First failure | t=187s — 664 users/s | t=171s |
+| Median concurrency (last third) | 9 simultaneous | 2 |
+| Peak concurrency | **198 simultaneous** | 250 |
+| nginx `worker_connections` warnings | **0** | 31 |
+| Throughput in the last 60s | 1,011 req/s | −2% |
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 | Observação |
+| Endpoint | Requests | OK | KO | p50 | p99 | Note |
 |---|---|---|---|---|---|---|
-| criação | 54.645 | 54.645 | **0** | 5 ms | 208 ms | zero falhas — ver abaixo |
-| consulta | 45.660 | 45.272 | 388 | 5 ms | 199 ms | `500` por falta de conexão |
-| busca válida | 9.590 | 9.414 | 176 | 13 ms | 211 ms | `500` por falta de conexão |
-| busca inválida | 4.190 | 4.190 | 0 | 1 ms | **37 ms** | não toca o banco |
+| criação | 54,645 | 54,645 | **0** | 5 ms | 208 ms | zero failures — see below |
+| consulta | 45,660 | 45,272 | 388 | 5 ms | 199 ms | `500` from lack of connections |
+| busca válida | 9,590 | 9,414 | 176 | 13 ms | 211 ms | `500` from lack of connections |
+| busca inválida | 4,190 | 4,190 | 0 | 1 ms | **37 ms** | never touches the database |
 
-### Diagnóstico
+### Diagnosis
 
-**As duas previsões se confirmaram, e a segunda é a mais interessante.**
+**Both predictions were confirmed, and the second one is the more interesting.**
 
-O Postgres registrou **635 `FATAL: sorry, too many clients already`**. A
-concorrência chegou a 198 requisições em voo, cada uma segurando sua própria
-conexão, contra um teto de 100. As falhas ficaram todas concentradas nos últimos
-20 segundos da corrida, quando a injeção passou de 660 usuários/s.
+Postgres logged **635 `FATAL: sorry, too many clients already`**. Concurrency
+reached 198 requests in flight, each holding its own connection, against a ceiling
+of 100. The failures were all concentrated in the last 20 seconds of the run, when
+injection passed 660 users/s.
 
-### O mesmo erro, dois relatos diferentes
+### The same error, two different reports
 
-Os 635 erros de conexão se dividiram assim:
+The 635 connection errors split like this:
 
 ```
 635 FATAL: sorry, too many clients already
-├── 564 nas rotas GET  → viraram 500   (sem try/catch, Express propaga)
-└──  71 na rota POST   → viraram 422   (o catch do handler engoliu)
+├── 564 on the GET routes  → became 500   (no try/catch, Express propagates)
+└──  71 on the POST route  → became 422   (the handler's catch swallowed it)
 ```
 
-O endpoint `criação` fechou a corrida com **zero falhas** segundo o Gatling — e
-com 71 pessoas a menos do que deveria. O `422` é resposta esperada no teste, então
-ninguém contou como erro. **A escrita se perdeu sem deixar rastro no status HTTP.**
+The `criação` endpoint finished the run with **zero failures** according to
+Gatling — and with 71 fewer people than it should have. `422` is an expected
+response in the test, so nobody counted it as an error. **The write was lost
+without leaving a trace in the HTTP status.**
 
-Foi exatamente a armadilha registrada na previsão. O `catch` do `POST /pessoas`
-devolve `422` para qualquer erro, e até a abordagem 4 isso era inofensivo porque o
-único erro possível era violação de `UNIQUE`. Assim que passou a existir um
-segundo motivo de falha, o handler passou a reportar problema de infraestrutura
-como erro de validação.
+That was exactly the trap recorded in the prediction. The `POST /pessoas` `catch`
+returns `422` for any error, and up to approach 4 that was harmless because the
+only possible error was a `UNIQUE` violation. As soon as a second failure mode
+came into existence, the handler started reporting an infrastructure problem as a
+validation error.
 
-Os `422` da corrida se decompõem assim:
+The run's `422`s decompose like this:
 
 ```
-8.637 respostas 422
-├── 5.655  validação pura (campo faltando, data inválida) — não tocam o banco
-├── 1.780  apelido duplicado
-├── 1.131  valor maior que o limite da coluna
-└──    71  falha de conexão  ← mascarada
+8,637 responses with 422
+├── 5,655  pure validation (missing field, invalid date) — never touch the database
+├── 1,780  duplicate apelido
+├── 1,131  value longer than the column limit
+└──    71  connection failure  ← masked
 ```
 
-### A parede do nginx sumiu
+### The nginx wall is gone
 
-Zero avisos de `worker_connections` — contra 6.762 na abordagem 3 e 31 na 4. O
-gargalo migrou do load balancer para o `max_connections` do Postgres. É a primeira
-abordagem da série em que o nginx não aparece no diagnóstico.
+Zero `worker_connections` warnings — against 6,762 in approach 3 and 31 in
+approach 4. The bottleneck migrated from the load balancer to the Postgres
+`max_connections`. It is the first approach in the series where nginx does not
+appear in the diagnosis.
 
-### O custo do handshake apareceu onde não tem banco
+### The handshake cost showed up where there is no database
 
-O p50 global foi de 1 ms para 5 ms, coerente com os 2,6 ms medidos de sobrecarga
-por requisição. Mas o número que explica melhor o que aconteceu é este:
+The global p50 went from 1 ms to 5 ms, consistent with the 2.6 ms of measured
+per-request overhead. But the number that best explains what happened is this one:
 
-| `busca inválida` | Abordagem 4 | Abordagem 5 |
+| `busca inválida` | Approach 4 | Approach 5 |
 |---|---|---|
 | p99 | 6 ms | **37 ms** |
 
-Esse endpoint responde `400` no primeiro `if` do handler, sem `await` e sem tocar
-o banco. Ele ficou **6× mais lento** mesmo sem fazer I/O nenhum — porque o event
-loop do Node está ocupado abrindo e fechando cerca de 1.200 conexões por segundo.
-O custo da conexão não fica contido na requisição que a abriu; ele contamina todas
-as outras que dividem o processo.
+That endpoint answers `400` at the handler's first `if`, with no `await` and
+without touching the database. It got **6× slower** while doing no I/O at all —
+because the Node event loop is busy opening and closing about 1,200 connections
+per second. The cost of a connection is not contained within the request that
+opened it; it contaminates every other request sharing the process.
 
-### A troca não compensou, e o motivo é a ordem dos experimentos
+### The trade did not pay off, and the reason is the order of the experiments
 
-A conexão por requisição elimina o head-of-line blocking — cada requisição roda em
-paralelo de verdade, sem fila. Esse era o problema central da abordagem 1, onde a
-fila respondia por mais de 99% da latência.
+Connection per request eliminates head-of-line blocking — each request genuinely
+runs in parallel, with no queue. That was the central problem of approach 1, where
+the queue accounted for more than 99% of the latency.
 
-**Mas esse problema já não existia.** O índice GIN tornou as queries tão baratas
-(0,13 ms na busca) que a fila da conexão única deixou de ser gargalo — a abordagem
-4 rodou com concorrência mediana de 2 e p50 de 1 ms. Não havia fila para eliminar.
+**But that problem no longer existed.** The GIN index made the queries so cheap
+(0.13 ms on search) that the single-connection queue stopped being a bottleneck —
+approach 4 ran with median concurrency of 2 and a p50 of 1 ms. There was no queue
+left to eliminate.
 
-O resultado é uma troca sem contrapartida:
+The result is a trade with nothing on the other side:
 
-| | Abordagem 4 | Abordagem 5 |
+| | Approach 4 | Approach 5 |
 |---|---|---|
 | p50 | 1 ms | 5 ms |
 | p95 | 45 ms | 103 ms |
-| Usuários criados | 46.549 | 45.660 |
-| Falhas | 49 | 564 |
-| Ganho de paralelismo | — | irrelevante |
+| People created | 46,549 | 45,660 |
+| Failures | 49 | 564 |
+| Parallelism gain | — | irrelevant |
 
-A lição não é que conexão por requisição seja ruim em toda situação — é que **a
-mesma mudança tem sinais opostos dependendo de onde está o gargalo**. Aplicada na
-abordagem 1, provavelmente teria ajudado muito. Aplicada depois do índice, só
-cobrou o preço.
+The lesson is not that connection per request is bad in every situation — it is
+that **the same change has opposite signs depending on where the bottleneck is**.
+Applied in approach 1, it would probably have helped a great deal. Applied after
+the index, it only charged the price.
 
-A reconciliação fecha exata:
+The reconciliation closes exactly:
 
 ```
-Gatling KO   :    564, todos 500, todos nos últimos 20 segundos
-status 201   : 45.660 = linhas no Postgres = requisições `consulta`
-status 500   :    564 = 388 do `consulta` + 176 do `busca válida`
-status 400   :  4.538 = 4.190 do `busca inválida` + 348 do `criação`
-status 200   : 54.689 = 54.686 do teste + 3 chamadas de `contagem-pessoas`
-FATAL no PG  :    635 = 564 que viraram 500 + 71 que viraram 422
+Gatling KO       :    564, all 500, all in the last 20 seconds
+status 201       : 45,660 = rows in Postgres = `consulta` requests
+status 500       :    564 = 388 from `consulta` + 176 from `busca válida`
+status 400       :  4,538 = 4,190 from `busca inválida` + 348 from `criação`
+status 200       : 54,689 = 54,686 from the test + 3 `contagem-pessoas` calls
+FATAL in Postgres:    635 = 564 that became 500 + 71 that became 422
 ```
 
-### Próximo passo
+### Next step
 
-Com o head-of-line blocking já resolvido pelo índice, o caminho natural é o
-**pool de conexões** — que fica no meio termo entre as duas estratégias já
-medidas: reaproveita conexões como o `pg.Client` compartilhado, mas com mais de
-uma, e com um teto configurável que impede estourar o `max_connections`.
+With head-of-line blocking already solved by the index, the natural path is the
+**connection pool** — which sits between the two strategies already measured: it
+reuses connections like the shared `pg.Client`, but with more than one, and with a
+configurable ceiling that prevents blowing past `max_connections`.
 
-E segue pendente a **abordagem de conformidade** com 1,5 CPU e 3,0 GB, que é a
-única forma de voltar a ter um gargalo que este teste consegue medir.
+And the **compliance approach** with 1.5 CPU and 3.0 GB is still pending, which is
+the only way to get back a bottleneck this test can measure.
 
 ---
 
-## Abordagem 6 — pool de conexões (`pg.Pool`)
+## Approach 6 — connection pool (`pg.Pool`)
 
 ```
 nginx (round-robin)
-  ├── api1 ── pool de até 10 conexões ─┐
-  └── api2 ── pool de até 10 conexões ─┴── Postgres (GIN trigram, max_connections=100)
+  ├── api1 ── pool of up to 10 connections ─┐
+  └── api2 ── pool of up to 10 connections ─┴── Postgres (GIN trigram, max_connections=100)
 ```
 
-Terceira e última estratégia de conexão da série. É o meio-termo exato entre as
-duas já medidas: reaproveita conexões como o `pg.Client` compartilhado, mas mantém
-várias em vez de uma.
+Third and last connection strategy of the series. It is the exact middle ground
+between the two already measured: it reuses connections like the shared
+`pg.Client`, but keeps several instead of one.
 
 ```js
 const pool = new Pool({ ... });
@@ -853,618 +875,627 @@ export async function query(text, params) {
 }
 ```
 
-O `pool.query()` pega uma conexão livre, executa e devolve ao pool
-automaticamente. Não há `connect` nem `end` por requisição — e por isso não há
-`try/finally`: não existe recurso para liberar manualmente.
+`pool.query()` takes a free connection, runs the query and returns it to the pool
+automatically. There is no per-request `connect` or `end` — and therefore no
+`try/finally`: there is no resource to release by hand.
 
-O pool é **preguiçoso**: abre conexões sob demanda até o teto e as mantém abertas
-depois disso. Medido em repouso após o boot: **1 conexão**. Depois de 30
-requisições concorrentes: **4 conexões**. Ele cresce até onde a carga exigir.
+The pool is **lazy**: it opens connections on demand up to the ceiling and keeps
+them open after that. Measured at rest after boot: **1 connection**. After 30
+concurrent requests: **4 connections**. It grows as far as the load demands.
 
-**Tamanho do pool: o padrão do `pg`, que é 10 por processo.** Deixei sem
-configurar de propósito, para que a única variável desta rodada seja a estratégia
-de conexão. Com 2 réplicas o teto agregado é 20 conexões — bem abaixo do
-`max_connections = 100` que a abordagem 5 estourou.
+**Pool size: the `pg` default, which is 10 per process.** I deliberately left it
+unconfigured, so that the only variable this round is the connection strategy.
+With 2 replicas the aggregate ceiling is 20 connections — well below the
+`max_connections = 100` that approach 5 blew past.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Pool` — até 10 conexões por processo, padrão do driver |
-| Réplicas da API | 2 |
-| Load balancer | nginx, upstream round-robin |
-| Limites de CPU/memória | nenhum |
-| Índices | PK, `UNIQUE` de `apelido` e GIN `gin_trgm_ops` sobre `busca` |
-| `max_connections` do Postgres | 100 (padrão) |
-| Teto agregado de conexões | 20 de 100 |
+| Database strategy | `pg.Pool` — up to 10 connections per process, driver default |
+| API replicas | 2 |
+| Load balancer | nginx, round-robin upstream |
+| CPU/memory limits | none |
+| Indexes | primary key, `UNIQUE` on `apelido` and GIN `gin_trgm_ops` over `busca` |
+| Postgres `max_connections` | 100 (default) |
+| Aggregate connection ceiling | 20 of 100 |
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor | vs. abordagem 4 |
+| Metric | Value | vs. approach 4 |
 |---|---|---|
-| **Requisições** | 115.000 | +0,03% |
-| **Sucesso** | 115.000 — **100,00%** | +0,04 p.p. |
-| **Falhas** | **0** | 49 |
-| **Usuários criados** | **46.580** | +31 |
-| Escritas perdidas | 0 | = |
+| **Requests** | 115,000 | +0.03% |
+| **Success** | 115,000 — **100.00%** | +0.04 p.p. |
+| **Failures** | **0** | 49 |
+| **People created** | **46,580** | +31 |
+| Lost writes | 0 | = |
 | **p50** | **1 ms** | = |
 | p75 | 1 ms | −50% |
 | p95 | 6 ms | **−87%** |
 | **p99** | **20 ms** | **−91%** |
-| máx | **117 ms** | −69% |
-| média | 2 ms | −80% |
-| **Vazão máxima** | 1.267 req/s ¹ | = |
-| Vazão útil média | 556 req/s | +0,2% |
-| **Segundos com falha** | **0 de 207** | 1 de 207 |
-| Concorrência mediana (último terço) | **1 simultâneo** | 2 |
-| **Concorrência no pico** | **29 simultâneos** | 250 |
-| Slots do nginx no pico | **58 de 512** | 500 de 512 |
-| Avisos de `worker_connections` | **0** | 31 |
-| Vazão nos últimos 60s | 1.034 req/s | +0,4% |
+| max | **117 ms** | −69% |
+| mean | 2 ms | −80% |
+| **Peak throughput** | 1,267 req/s ¹ | = |
+| Mean useful throughput | 556 req/s | +0.2% |
+| **Seconds with failures** | **0 of 207** | 1 of 207 |
+| Median concurrency (last third) | **1 simultaneous** | 2 |
+| **Peak concurrency** | **29 simultaneous** | 250 |
+| nginx slots at the peak | **58 of 512** | 500 of 512 |
+| `worker_connections` warnings | **0** | 31 |
+| Throughput in the last 60s | 1,034 req/s | +0.4% |
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 | Custo no Postgres |
+| Endpoint | Requests | OK | KO | p50 | p99 | Cost in Postgres |
 |---|---|---|---|---|---|---|
-| criação | 54.640 | 54.640 | 0 | 1 ms | **9 ms** | 0,82 ms (Insert + GIN) |
-| consulta | 46.580 | 46.580 | 0 | 1 ms | **5 ms** | 0,15 ms (Index Scan) |
-| busca válida | 9.590 | 9.590 | 0 | 4 ms | **37 ms** | 0,13 ms (Bitmap Index Scan) |
-| busca inválida | 4.190 | 4.190 | 0 | 1 ms | 7 ms | não toca o banco |
+| criação | 54,640 | 54,640 | 0 | 1 ms | **9 ms** | 0.82 ms (Insert + GIN) |
+| consulta | 46,580 | 46,580 | 0 | 1 ms | **5 ms** | 0.15 ms (Index Scan) |
+| busca válida | 9,590 | 9,590 | 0 | 4 ms | **37 ms** | 0.13 ms (Bitmap Index Scan) |
+| busca inválida | 4,190 | 4,190 | 0 | 1 ms | 7 ms | never touches the database |
 
-### Diagnóstico
+### Diagnosis
 
-**100,00% de sucesso — 115.000 requisições, zero falhas.** Primeira e única
-abordagem da série sem um único erro, em nenhum segundo da corrida.
+**100.00% success — 115,000 requests, zero failures.** The first and only approach
+in the series without a single error, in any second of the run.
 
-O Postgres não registrou nenhum `too many clients`, e o nginx não emitiu um único
-aviso de `worker_connections`. Os dois tetos que apareceram nas abordagens
-anteriores ficaram fora de alcance por larga margem.
+Postgres logged no `too many clients`, and nginx emitted not a single
+`worker_connections` warning. The two ceilings that appeared in the previous
+approaches stayed out of reach by a wide margin.
 
-### A previsão errou na parte que importava
+### The prediction was wrong on the part that mattered
 
-Registrei que "contra a abordagem 4 o ganho deve ser pequeno", porque ela já rodava
-com concorrência mediana de 2 e p50 de 1 ms — quase não havia fila para o pool
-eliminar. **A mediana de fato não mudou. O erro foi supor que isso tornava o ganho
-pequeno.**
+I recorded that "against approach 4 the gain should be small", because it already
+ran with median concurrency of 2 and a p50 of 1 ms — there was almost no queue for
+the pool to eliminate. **The median indeed did not change. The mistake was
+assuming that made the gain small.**
 
-| Último terço (t=138–207s) | Abordagem 4 | Abordagem 5 | **Abordagem 6** |
+| Last third (t=138–207s) | Approach 4 | Approach 5 | **Approach 6** |
 |---|---|---|---|
-| concorrência mediana | 2 | 9 | **1** |
-| concorrência p95 | 90 | 149 | **4** |
-| concorrência no pico | 250 | 198 | **29** |
-| p50 mediano por segundo | 1,0 ms | 8,0 ms | **1,0 ms** |
-| **pior segundo (p50)** | **125 ms** | 175 ms | **1,0 ms** |
+| median concurrency | 2 | 9 | **1** |
+| p95 concurrency | 90 | 149 | **4** |
+| peak concurrency | 250 | 198 | **29** |
+| median per-second p50 | 1.0 ms | 8.0 ms | **1.0 ms** |
+| **worst second (p50)** | **125 ms** | 175 ms | **1.0 ms** |
 
-A mediana era igual nas duas. O que separava a abordagem 4 do sucesso total eram
-os **picos** — e era neles que estavam 100% das falhas, todos os avisos do nginx e
-o p99 de 212 ms.
+The median was the same in both. What separated approach 4 from total success were
+the **spikes** — and that is where 100% of the failures lived, along with every
+nginx warning and the p99 of 212 ms.
 
-O pool não melhorou o caso comum; ele **eliminou o pior caso**. O p50 do pior
-segundo da corrida caiu de 125 ms para 1 ms: não existe mais "pior segundo". A
-distribuição virou plana.
+The pool did not improve the common case; it **eliminated the worst case**. The
+p50 of the worst second of the run dropped from 125 ms to 1 ms: there is no "worst
+second" any more. The distribution went flat.
 
-Isso mostra o limite de raciocinar por medianas. A concorrência mediana 2 dizia
-"não há fila", e estava certa — na mediana. Mas 5% do tempo a fila chegava a 90
-requisições, e é isso que produz p99 ruim e falha. **Uma métrica de tendência
-central não consegue prever o comportamento na cauda.**
+This shows the limit of reasoning by medians. A median concurrency of 2 said
+"there is no queue", and it was right — at the median. But 5% of the time the
+queue reached 90 requests, and that is what produces a bad p99 and failures. **A
+measure of central tendency cannot predict behavior in the tail.**
 
-### O que aconteceu com o head-of-line blocking
+### What happened to head-of-line blocking
 
-O `pg.Client` compartilhado despacha uma query por vez. Enquanto a carga é leve,
-isso não aparece — a fila esvazia entre as chegadas. Num pico, as requisições
-chegam mais rápido do que a única conexão consegue despachar, a fila cresce, a
-latência sobe, e por `L = λ × W` a concorrência sobe junto, até encostar nos 512
-slots do nginx.
+The shared `pg.Client` dispatches one query at a time. While the load is light,
+this does not show — the queue drains between arrivals. In a spike, requests
+arrive faster than the single connection can dispatch, the queue grows, latency
+rises, and by `L = λ × W` concurrency rises with it, until it touches the 512
+nginx slots.
 
-Com 10 conexões por processo, o pico é absorvido: **o pico de concorrência caiu de
-250 para 29**, e os slots usados de 500 para 58 — de 98% do teto do nginx para
-11%. A cadeia inteira que produzia falhas desde a abordagem 1 deixou de existir.
+With 10 connections per process, the spike is absorbed: **peak concurrency dropped
+from 250 to 29**, and slots used from 500 to 58 — from 98% of the nginx ceiling to
+11%. The entire chain that had been producing failures since approach 1 ceased to
+exist.
 
-Vale notar o quanto disso é reserva não utilizada: o teto agregado era de 20
-conexões e o pico de concorrência foi 29 requisições em voo. **O pool nunca chegou
-perto do próprio limite** — a fila que ele precisou absorver era muito menor que
-sua capacidade.
+It is worth noting how much of this is unused reserve: the aggregate ceiling was
+20 connections and peak concurrency was 29 requests in flight. **The pool never
+came close to its own limit** — the queue it had to absorb was much smaller than
+its capacity.
 
-### Comparando as três estratégias de conexão
+### Comparing the three connection strategies
 
-Todas as três rodaram com 2 réplicas e o mesmo índice. A única variável foi como a
-conexão é obtida:
+All three ran with 2 replicas and the same index. The only variable was how the
+connection is obtained:
 
-| | `Client` compartilhado | conexão por requisição | **`Pool` (10/proc)** |
+| | shared `Client` | connection per request | **`Pool` (10/proc)** |
 |---|---|---|---|
-| Abordagem | 4 | 5 | **6** |
-| Sucesso | 99,96% | 99,51% | **100,00%** |
+| Approach | 4 | 5 | **6** |
+| Success | 99.96% | 99.51% | **100.00%** |
 | p50 | 1 ms | 5 ms | **1 ms** |
 | p99 | 212 ms | 203 ms | **20 ms** |
-| Falhas | 49 | 564 | **0** |
-| Escritas perdidas | 0 | 71 | **0** |
-| Gargalo atingido | slots do nginx | `max_connections` | **nenhum** |
+| Failures | 49 | 564 | **0** |
+| Lost writes | 0 | 71 | **0** |
+| Bottleneck reached | nginx slots | `max_connections` | **none** |
 
-As duas alternativas falharam por motivos opostos — a conexão única por escassez
-de paralelismo nos picos, a conexão por requisição por excesso de conexões. O pool
-fica no meio: reaproveita como a primeira, paraleliza como a segunda, e tem teto
-configurável que impede o descontrole da segunda.
+The two alternatives failed for opposite reasons — the single connection from a
+shortage of parallelism during spikes, the connection per request from an excess
+of connections. The pool sits in the middle: it reuses like the first,
+parallelizes like the second, and has a configurable ceiling that prevents the
+second one's runaway.
 
-**O padrão do driver bastou.** Não configurei `max`, `idleTimeoutMillis` nem
-`connectionTimeoutMillis` — os 10 por processo do padrão do `pg` já deixaram o
-sistema com folga de 3× sobre o pico observado.
+**The driver default was enough.** I did not configure `max`, `idleTimeoutMillis`
+or `connectionTimeoutMillis` — the 10 per process of the `pg` default already left
+the system with 3× of headroom over the observed peak.
 
-A reconciliação fecha exata:
+The reconciliation closes exactly:
 
 ```
-Gatling KO   :      0
-status 201   : 46.580 = linhas no Postgres = requisições `consulta`
-status 400   :  4.538 = 4.190 do `busca inválida` + 348 do `criação`
-status 422   :  7.712 = 1.834 duplicados + 1.150 valor longo + 4.728 validação
-status 200   : 56.173 = 56.170 do teste + 3 chamadas de `contagem-pessoas`
-erros no PG  :      0 de conexão
+Gatling KO       :      0
+status 201       : 46,580 = rows in Postgres = `consulta` requests
+status 400       :  4,538 = 4,190 from `busca inválida` + 348 from `criação`
+status 422       :  7,712 = 1,834 duplicates + 1,150 too-long values + 4,728 validation
+status 200       : 56,173 = 56,170 from the test + 3 `contagem-pessoas` calls
+errors in Postgres:     0 connection errors
 ```
 
-### Próximo passo
+### Next step
 
-Com 100% de sucesso e p99 de 20 ms, este teste não consegue mais medir o sistema —
-não há gargalo observável, e a vazão máxima é a rampa do Gatling, não a
-capacidade da API.
+With 100% success and a p99 of 20 ms, this test can no longer measure the system —
+there is no observable bottleneck, and peak throughput is the Gatling ramp, not
+the capacity of the API.
 
-Resta a **abordagem de conformidade**: 1,5 CPU e 3,0 GB distribuídos entre os
-quatro contêineres, como as regras da Rinha exigem. Com 1,5 CPU em vez das 12 da
-máquina, um gargalo deve reaparecer — e será o primeiro da série a ser de CPU, não
-de I/O nem de configuração.
+What remains is the **compliance approach**: 1.5 CPU and 3.0 GB split across the
+four containers, as the Rinha rules require. With 1.5 CPU instead of the machine's
+12, a bottleneck should reappear — and it will be the first of the series to be a
+CPU bottleneck, not I/O and not configuration.
 
 ---
 
-## Abordagem 7 — conformidade: 1,5 CPU e 3,0 GB
+## Approach 7 — compliance: 1.5 CPU and 3.0 GB
 
 ```
-nginx      0,20 CPU / 0,3 GB
-  ├── api1 0,30 CPU / 0,6 GB ── pool de 10 ─┐
-  └── api2 0,30 CPU / 0,6 GB ── pool de 10 ─┴── database 0,70 CPU / 1,5 GB
+nginx      0.20 CPU / 0.3 GB
+  ├── api1 0.30 CPU / 0.6 GB ── pool of 10 ─┐
+  └── api2 0.30 CPU / 0.6 GB ── pool of 10 ─┴── database 0.70 CPU / 1.5 GB
 ```
 
-Mantém tudo da abordagem 6 e aplica as restrições que as regras da Rinha exigem:
-**1,5 unidade de CPU e 3,0 GB no total**, distribuídos entre os quatro
-contêineres. É a primeira configuração da série que seria válida no torneio.
+Keeps everything from approach 6 and applies the restrictions the Rinha rules
+require: **1.5 CPU units and 3.0 GB in total**, split across the four containers.
+It is the first configuration in the series that would be valid in the tournament.
 
-Até aqui todas as abordagens rodaram sem limite nenhum, disputando as 12 CPUs da
-máquina com o próprio gerador de carga. Agora a aplicação passa a ter **12,5% do
-que tinha antes**.
+Until now every approach ran with no limits at all, competing for the machine's 12
+CPUs with the load generator itself. Now the application gets **12.5% of what it
+had before**.
 
-### Como o orçamento foi dividido
+### How the budget was divided
 
-A divisão não foi arbitrária — saiu do custo de CPU já medido com
-`EXPLAIN ANALYZE` em cada endpoint:
+The split was not arbitrary — it came from the CPU cost already measured with
+`EXPLAIN ANALYZE` on each endpoint:
 
-| Endpoint | Requisições | Custo unitário | CPU total na corrida | Fatia |
+| Endpoint | Requests | Unit cost | Total CPU in the run | Share |
 |---|---|---|---|---|
-| criação | 54.640 | 0,82 ms | 44,8 s | **83%** |
-| consulta | 46.580 | 0,15 ms | 7,0 s | 13% |
-| busca válida | 9.590 | 0,20 ms | 1,9 s | 4% |
-| busca inválida | 4.190 | — | 0 s | 0% |
-| **Total** | | | **53,7 s** | |
+| criação | 54,640 | 0.82 ms | 44.8 s | **83%** |
+| consulta | 46,580 | 0.15 ms | 7.0 s | 13% |
+| busca válida | 9,590 | 0.20 ms | 1.9 s | 4% |
+| busca inválida | 4,190 | — | 0 s | 0% |
+| **Total** | | | **53.7 s** | |
 
-Sobre os 207 segundos da corrida isso dá 0,26 CPU em média. Mas o pico foi de
-1.267 req/s contra 556 de média — fator 2,3× — então **o Postgres precisa de
-~0,59 CPU no momento de maior carga**.
+Over the 207 seconds of the run that comes to 0.26 CPU on average. But the peak
+was 1,267 req/s against a mean of 556 — a factor of 2.3× — so **Postgres needs
+~0.59 CPU at the moment of highest load**.
 
-Daí a alocação:
+Hence the allocation:
 
-| Contêiner | CPU | Memória | Justificativa |
+| Container | CPU | Memory | Rationale |
 |---|---|---|---|
-| database | **0,70** | 1,5 GB | 0,59 medido no pico + 19% de folga; 83% disso é manutenção do índice GIN no `INSERT` |
-| api1 | 0,30 | 0,6 GB | ~630 req/s por réplica: Express, JSON e protocolo do `pg` |
-| api2 | 0,30 | 0,6 GB | idem |
-| nginx | 0,20 | 0,3 GB | proxiar 1.267 req/s é trabalho barato para 1 worker |
-| **Total** | **1,50** | **3,0 GB** | |
+| database | **0.70** | 1.5 GB | 0.59 measured at the peak + 19% of headroom; 83% of it is GIN index maintenance on `INSERT` |
+| api1 | 0.30 | 0.6 GB | ~630 req/s per replica: Express, JSON and the `pg` protocol |
+| api2 | 0.30 | 0.6 GB | same |
+| nginx | 0.20 | 0.3 GB | proxying 1,267 req/s is cheap work for 1 worker |
+| **Total** | **1.50** | **3.0 GB** | |
 
-**A memória é folga pura.** Em repouso os quatro contêineres somam 135 MB —
-nginx 2,5 MB, cada API 25 MB, Postgres 85 MB. Os 3,0 GB do orçamento são
-irrelevantes para este workload; a disputa é inteiramente por CPU. A divisão de
-memória existe só para cumprir a regra e evitar OOM em algum pico.
+**The memory is pure headroom.** At rest the four containers add up to 135 MB —
+nginx 2.5 MB, each API 25 MB, Postgres 85 MB. The 3.0 GB of the budget are
+irrelevant for this workload; the contention is entirely for CPU. The memory split
+exists only to satisfy the rule and to avoid an OOM on some spike.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Pool` — até 10 conexões por processo |
-| Réplicas da API | 2 |
-| Load balancer | nginx, upstream round-robin |
-| **Limites de CPU/memória** | **1,5 CPU / 3,0 GB — conforme as regras** |
-| Índices | PK, `UNIQUE` de `apelido` e GIN `gin_trgm_ops` sobre `busca` |
+| Database strategy | `pg.Pool` — up to 10 connections per process |
+| API replicas | 2 |
+| Load balancer | nginx, round-robin upstream |
+| **CPU/memory limits** | **1.5 CPU / 3.0 GB — as the rules require** |
+| Indexes | primary key, `UNIQUE` on `apelido` and GIN `gin_trgm_ops` over `busca` |
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor | vs. abordagem 6 |
+| Metric | Value | vs. approach 6 |
 |---|---|---|
-| **Requisições** | 92.032 | −20,0% |
-| **Sucesso** | 55.886 — **60,72%** | **−39,3 p.p.** |
-| Falhas | **36.146** | 0 |
-| **Usuários criados** | **23.611** | **−49,3%** |
-| Escritas perdidas | 0 | = |
+| **Requests** | 92,032 | −20.0% |
+| **Success** | 55,886 — **60.72%** | **−39.3 p.p.** |
+| Failures | **36,146** | 0 |
+| **People created** | **23,611** | **−49.3%** |
+| Lost writes | 0 | = |
 | **p50** | **1 ms** | = |
 | p75 | 4 ms | 4× |
-| p95 | 1.595 ms | 266× |
-| **p99** | **2.429 ms** | **121×** |
-| máx | 5.309 ms | 45× |
-| média | 224 ms | 112× |
-| Vazão máxima com 100% de sucesso | 902 req/s ² | 1.267 req/s |
-| Vazão útil média | 266 req/s | −52% |
-| **Segundos com falha** | **85 de 210** | 0 |
-| **Ponto de ruptura** | **t=119s — 395 usuários/s** | não houve |
-| Início da degradação | t=119s | não houve |
-| Concorrência no pico | 259 (518 slots de 512) | 29 (58 slots) |
-| Vazão nos últimos 60s | 262 req/s (−81% do pico) | 1.034 req/s |
+| p95 | 1,595 ms | 266× |
+| **p99** | **2,429 ms** | **121×** |
+| max | 5,309 ms | 45× |
+| mean | 224 ms | 112× |
+| Peak throughput at 100% success | 902 req/s ² | 1,267 req/s |
+| Mean useful throughput | 266 req/s | −52% |
+| **Seconds with failures** | **85 of 210** | 0 |
+| **Breaking point** | **t=119s — 395 users/s** | none |
+| Degradation starts | t=119s | none |
+| Peak concurrency | 259 (518 of 512 slots) | 29 (58 slots) |
+| Throughput in the last 60s | 262 req/s (−81% from the peak) | 1,034 req/s |
 
-² Ver a ressalva sobre os picos de drenagem no diagnóstico — este número não mede
-capacidade nesta abordagem.
+² See the caveat about the drainage spikes in the diagnosis — this number does not
+measure capacity in this approach.
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 |
+| Endpoint | Requests | OK | KO | p50 | p99 |
 |---|---|---|---|---|---|
-| criação | 54.641 | 27.609 | 27.032 | 1 ms | 2.389 ms |
-| consulta | 23.611 | 21.036 | 2.575 | 1 ms | 2.288 ms |
-| busca válida | 9.590 | 4.983 | 4.607 | 2 ms | 3.091 ms |
-| busca inválida | 4.190 | 2.258 | 1.932 | 1 ms | 7 ms |
+| criação | 54,641 | 27,609 | 27,032 | 1 ms | 2,389 ms |
+| consulta | 23,611 | 21,036 | 2,575 | 1 ms | 2,288 ms |
+| busca válida | 9,590 | 4,983 | 4,607 | 2 ms | 3,091 ms |
+| busca inválida | 4,190 | 2,258 | 1,932 | 1 ms | 7 ms |
 
-### Diagnóstico
+### Diagnosis
 
-**A restrição derrubou o sistema de volta ao patamar da abordagem 1** — 60,72%
-contra 59,60%. Sete rodadas de otimização foram anuladas por um limite de CPU.
+**The restriction dropped the system back to the level of approach 1** — 60.72%
+against 59.60%. Seven rounds of optimization were cancelled out by a CPU limit.
 
-O `cpu.stat` do cgroup responde exatamente onde:
+The cgroup's `cpu.stat` answers exactly where:
 
-| Contêiner | Concedido | Usado (média) | Uso | Períodos com throttling | Tempo congelado |
+| Container | Granted | Used (mean) | Usage | Periods with throttling | Time frozen |
 |---|---|---|---|---|---|
-| **database** | 0,70 | 0,41 | 59% | **41,9%** | **808,7 s** |
-| api1 | 0,30 | 0,05 | 15% | 0,2% | 0,4 s |
-| api2 | 0,30 | 0,05 | 16% | 0,3% | 0,7 s |
-| nginx | 0,20 | 0,04 | 20% | 0,2% | 0,1 s |
-| **Total** | **1,50** | **0,54** | **36%** | | |
+| **database** | 0.70 | 0.41 | 59% | **41.9%** | **808.7 s** |
+| api1 | 0.30 | 0.05 | 15% | 0.2% | 0.4 s |
+| api2 | 0.30 | 0.05 | 16% | 0.3% | 0.7 s |
+| nginx | 0.20 | 0.04 | 20% | 0.2% | 0.1 s |
+| **Total** | **1.50** | **0.54** | **36%** | | |
 
-**O Postgres foi congelado em 42% de todas as janelas de 100 ms, somando 808
-segundos de paralisação forçada numa corrida de 210 segundos** (o número passa da
-duração porque conta processos paralelos). Os outros três contêineres praticamente
-não sofreram throttling.
+**Postgres was frozen in 42% of all 100 ms windows, adding up to 808 seconds of
+forced pause in a 210-second run** (the number exceeds the duration because it
+counts parallel processes). The other three containers barely suffered any
+throttling.
 
-### O sistema falhou usando 36% do orçamento
+### The system failed while using 36% of the budget
 
-Esse é o dado mais importante da rodada. **O conjunto consumiu 0,54 das 1,5 CPU
-concedidas e ainda assim reprovou 39% das requisições.** Não faltou orçamento —
-faltou distribuí-lo onde o trabalho estava.
+This is the most important figure of the round. **The set consumed 0.54 of the
+1.5 CPU granted and still rejected 39% of the requests.** Budget was not
+missing — distributing it where the work was is what was missing.
 
-Enquanto o banco era congelado quase metade do tempo, as duas APIs rodavam a 15%
-da própria cota. A regra da Rinha não foi o problema; a minha divisão foi.
+While the database was frozen almost half the time, the two APIs ran at 15% of
+their own quota. The Rinha rule was not the problem; my split was.
 
-### Onde a estimativa errou: `Planning Time`
+### Where the estimate went wrong: `Planning Time`
 
-Calculei o orçamento a partir do `Execution Time` do `EXPLAIN ANALYZE`. Esse campo
-mede só a execução do plano — **não inclui o tempo de planejar a query**, que o
-Postgres paga a cada chamada.
+I computed the budget from the `Execution Time` of `EXPLAIN ANALYZE`. That field
+measures only the execution of the plan — **it does not include the time to plan
+the query**, which Postgres pays on every call.
 
-| Query | Planning | Execution | Total | O que usei |
+| Query | Planning | Execution | Total | What I used |
 |---|---|---|---|---|
-| busca | **1,154 ms** | 0,193 ms | 1,347 ms | 0,20 ms |
-| consulta | **0,470 ms** | 0,057 ms | 0,527 ms | 0,15 ms |
-| criação | 0,063 ms | 0,795 ms | 0,858 ms | 0,82 ms |
+| busca | **1.154 ms** | 0.193 ms | 1.347 ms | 0.20 ms |
+| consulta | **0.470 ms** | 0.057 ms | 0.527 ms | 0.15 ms |
+| criação | 0.063 ms | 0.795 ms | 0.858 ms | 0.82 ms |
 
-Na busca, planejar custa **6× mais que executar**. É consequência direta do índice:
-com três caminhos possíveis (GIN, `Seq Scan`, PK) o planner tem mais o que avaliar,
-e a query em si ficou tão barata que o planejamento passou a dominar.
+On the search, planning costs **6× more than executing**. It is a direct
+consequence of the index: with three possible paths (GIN, `Seq Scan`, primary key)
+the planner has more to evaluate, and the query itself became so cheap that
+planning came to dominate.
 
-Refazendo a conta com os dois campos:
+Redoing the math with both fields:
 
 ```
-minha estimativa : 46,6 s de CPU  →  0,59 CPU no pico  →  cabe em 0,70  ✅
-custo real       : 72,2 s de CPU  →  0,78 CPU no pico  →  NÃO cabe      ❌
+my estimate  : 46.6 s of CPU  →  0.59 CPU at the peak  →  fits in 0.70  ✅
+real cost    : 72.2 s of CPU  →  0.78 CPU at the peak  →  DOES NOT fit  ❌
 ```
 
-Subestimei em 1,5×. O banco precisava de mais do que recebeu justamente no pico.
+I underestimated by 1.5×. The database needed more than it got precisely at the
+peak.
 
-### Média baixa, throttling alto — de novo a cauda
+### Low mean, high throttling — the tail again
 
-O banco usou 59% da sua cota **em média** e mesmo assim foi congelado em 42% das
-janelas. Não é contradição: o throttling do Docker julga cada janela de 100 ms
-isoladamente. Demanda irregular estoura a cota em algumas janelas e fica ociosa em
-outras, e a média esconde as duas coisas.
+The database used 59% of its quota **on average** and was still frozen in 42% of
+the windows. That is not a contradiction: Docker's throttling judges each 100 ms
+window in isolation. Irregular demand blows past the quota in some windows and
+sits idle in others, and the mean hides both.
 
-É a mesma lição da [abordagem 6](#a-previsão-errou-na-parte-que-importava), agora
-do lado da infraestrutura: **médias não preveem comportamento de cauda**. Um
-gráfico de CPU média teria mostrado 59% e passado a impressão de folga confortável.
+It is the same lesson as
+[approach 6](#the-prediction-was-wrong-on-the-part-that-mattered), now on the
+infrastructure side: **means do not predict tail behavior**. A mean-CPU chart
+would have shown 59% and given the impression of comfortable headroom.
 
-### A assinatura do throttling na vazão
+### The signature of throttling in the throughput
 
-A ruptura veio em t=119s com apenas 395 usuários/s — mais cedo que em qualquer
-abordagem anterior, incluindo a primeira. Depois disso o comportamento fica
-serrilhado de um jeito característico:
+The breaking point came at t=119s with only 395 users/s — earlier than in any
+previous approach, including the first. After that the behavior becomes a sawtooth
+in a characteristic way:
 
 | t | ok/s | ko/s | p50 |
 |---|---|---|---|
-| 193 | 129 | 634 | 1.690 ms |
-| 194 | 190 | 612 | 1.403 ms |
-| **195** | **1.356** | **124** | **2 ms** |
+| 193 | 129 | 634 | 1,690 ms |
+| 194 | 190 | 612 | 1,403 ms |
+| **195** | **1,356** | **124** | **2 ms** |
 | **196** | **583** | **121** | **1 ms** |
 | 197 | 177 | 625 | 789 ms |
 
-Os segundos 195 e 196 não são recuperação — são **drenagem**. A fila acumulada
-durante o congelamento escoa de uma vez quando o banco volta a receber CPU, com
-latência baixíssima porque as queries em si continuam baratas. Depois a fila
-recomeça.
+Seconds 195 and 196 are not recovery — they are **drainage**. The queue built up
+during the freeze flushes all at once when the database gets CPU again, with very
+low latency because the queries themselves are still cheap. Then the queue starts
+over.
 
-É por isso que a "vazão máxima com 100% de sucesso" desta rodada, 902 req/s, não
-mede capacidade: é o tamanho de uma rajada de drenagem, não uma vazão sustentável.
+That is why this round's "peak throughput at 100% success", 902 req/s, does not
+measure capacity: it is the size of a drainage burst, not a sustainable
+throughput.
 
-### O gargalo migrou de novo
+### The bottleneck moved again
 
-Os 35.357 avisos de `worker_connections` e as 259 requisições simultâneas (518 dos
-512 slots) reproduzem exatamente o padrão das abordagens 1 a 3. Mas a causa é
-outra: antes era o `Seq Scan`, agora é o throttling. A cadeia é a mesma —
-
-```
-CPU congelada → latência alta → L = λ × W infla a concorrência
-              → 512 slots esgotam → nginx fecha o socket
-```
-
-O Postgres não registrou nenhum erro de conexão: o pool continuou saudável. O
-problema não foi acesso ao banco, foi o banco não ter CPU para atender.
-
-A reconciliação fecha exata:
+The 35,357 `worker_connections` warnings and the 259 simultaneous requests (518 of
+the 512 slots) reproduce exactly the pattern of approaches 1 to 3. But the cause is
+different: before it was the `Seq Scan`, now it is throttling. The chain is the
+same —
 
 ```
-Gatling KO   : 36.146 = 36.002 Premature close + 144 status 500
-status 500   :    144 = worker_connections ao conectar no upstream
-status 201   : 23.611 = linhas no Postgres = requisições `consulta`
-status 400   :  2.457 = 2.258 do `busca inválida` + 199 do `criação`
-erros no PG  :      0 de conexão
+frozen CPU → high latency → L = λ × W inflates concurrency
+           → 512 slots exhausted → nginx closes the socket
 ```
 
-### Próximo passo
+Postgres logged no connection errors: the pool stayed healthy. The problem was not
+access to the database, it was the database not having CPU to serve.
 
-A correção é redistribuir o orçamento seguindo o consumo medido, sem mexer no
-total de 1,5 CPU:
+The reconciliation closes exactly:
 
-| Contêiner | Atual | Usado | **Proposta** | Folga sobre o pico |
+```
+Gatling KO       : 36,146 = 36,002 Premature close + 144 status 500
+status 500       :    144 = worker_connections when connecting upstream
+status 201       : 23,611 = rows in Postgres = `consulta` requests
+status 400       :  2,457 = 2,258 from `busca inválida` + 199 from `criação`
+errors in Postgres:     0 connection errors
+```
+
+### Next step
+
+The fix is to redistribute the budget following the measured consumption, without
+touching the 1.5 CPU total:
+
+| Container | Current | Used | **Proposal** | Headroom over the peak |
 |---|---|---|---|---|
-| database | 0,70 | 0,41 | **1,00** | 28% sobre os 0,78 do pico |
-| api1 | 0,30 | 0,05 | **0,20** | 4× |
-| api2 | 0,30 | 0,05 | **0,20** | 4× |
-| nginx | 0,20 | 0,04 | **0,10** | 2,5× |
-| **Total** | **1,50** | 0,54 | **1,50** | |
+| database | 0.70 | 0.41 | **1.00** | 28% over the 0.78 of the peak |
+| api1 | 0.30 | 0.05 | **0.20** | 4× |
+| api2 | 0.30 | 0.05 | **0.20** | 4× |
+| nginx | 0.20 | 0.04 | **0.10** | 2.5× |
+| **Total** | **1.50** | 0.54 | **1.50** | |
 
-E há uma otimização de aplicação que a rodada revelou: **`Planning Time` domina
-duas das três queries**. Um `PREPARE` (ou os prepared statements do `pg`, via a
-opção `name` na query) planeja uma vez e reutiliza, o que atacaria 1,15 ms dos
-1,35 ms da busca. É o primeiro gargalo da série que está no Postgres mas não é
-nem I/O nem índice.
+And there is an application-level optimization this round revealed: **`Planning
+Time` dominates two of the three queries**. A `PREPARE` (or the `pg` prepared
+statements, via the `name` option on the query) plans once and reuses, which would
+attack 1.15 ms of the search's 1.35 ms. It is the first bottleneck of the series
+that lives in Postgres but is neither I/O nor index.
 
 ---
 
-## Abordagem 8 — conformidade com orçamento redistribuído
+## Approach 8 — compliance with a redistributed budget
 
 ```
-nginx      0,10 CPU / 0,3 GB
-  ├── api1 0,20 CPU / 0,6 GB ── pool de 10 ─┐
-  └── api2 0,20 CPU / 0,6 GB ── pool de 10 ─┴── database 1,00 CPU / 1,5 GB
+nginx      0.10 CPU / 0.3 GB
+  ├── api1 0.20 CPU / 0.6 GB ── pool of 10 ─┐
+  └── api2 0.20 CPU / 0.6 GB ── pool of 10 ─┴── database 1.00 CPU / 1.5 GB
 ```
 
-Mesmo total de 1,5 CPU e 3,0 GB da abordagem 7, redistribuído segundo o consumo
-que o `cpu.stat` mediu. Nada mudou no código, no índice ou na topologia — **a
-única variável é para onde o orçamento vai**.
+The same 1.5 CPU and 3.0 GB total as approach 7, redistributed according to what
+`cpu.stat` measured. Nothing changed in the code, the index or the topology — **the
+only variable is where the budget goes**.
 
-| Contêiner | Abordagem 7 | Usado lá | **Abordagem 8** | Folga sobre a demanda de pico |
+| Container | Approach 7 | Used there | **Approach 8** | Headroom over peak demand |
 |---|---|---|---|---|
-| database | 0,70 | 0,41 (throttled 42%) | **1,00** | 28% sobre os 0,78 do pico |
-| api1 | 0,30 | 0,05 | **0,20** | 4× |
-| api2 | 0,30 | 0,05 | **0,20** | 4× |
-| nginx | 0,20 | 0,04 | **0,10** | 2,5× |
-| **Total** | 1,50 | 0,54 | **1,50** | |
+| database | 0.70 | 0.41 (throttled 42%) | **1.00** | 28% over the 0.78 of the peak |
+| api1 | 0.30 | 0.05 | **0.20** | 4× |
+| api2 | 0.30 | 0.05 | **0.20** | 4× |
+| nginx | 0.20 | 0.04 | **0.10** | 2.5× |
+| **Total** | 1.50 | 0.54 | **1.50** | |
 
-A abordagem 7 falhou consumindo 36% do orçamento: o banco era congelado em 42% das
-janelas de 100 ms enquanto as APIs rodavam a 15% da própria cota. Esta rodada
-testa se o problema era mesmo distribuição, e não escassez.
+Approach 7 failed while consuming 36% of the budget: the database was frozen in
+42% of the 100 ms windows while the APIs ran at 15% of their own quota. This round
+tests whether the problem really was distribution and not scarcity.
 
-### Configuração
+### Configuration
 
 | | |
 |---|---|
-| Estratégia de banco | `pg.Pool` — até 10 conexões por processo |
-| Réplicas da API | 2 |
-| Load balancer | nginx, upstream round-robin |
-| **Limites de CPU/memória** | **1,5 CPU / 3,0 GB — conforme as regras** |
-| Índices | PK, `UNIQUE` de `apelido` e GIN `gin_trgm_ops` sobre `busca` |
+| Database strategy | `pg.Pool` — up to 10 connections per process |
+| API replicas | 2 |
+| Load balancer | nginx, round-robin upstream |
+| **CPU/memory limits** | **1.5 CPU / 3.0 GB — as the rules require** |
+| Indexes | primary key, `UNIQUE` on `apelido` and GIN `gin_trgm_ops` over `busca` |
 
-### Estatísticas
+### Statistics
 
-| Métrica | Valor | vs. abordagem 7 |
+| Metric | Value | vs. approach 7 |
 |---|---|---|
-| **Requisições** | 99.010 | +7,6% |
-| **Sucesso** | 73.802 — **74,54%** | **+13,8 p.p.** |
-| Falhas | 25.208 | −30,3% |
-| **Usuários criados** | **30.603** | **+29,6%** |
-| Escritas perdidas | 0 | = |
+| **Requests** | 99,010 | +7.6% |
+| **Success** | 73,802 — **74.54%** | **+13.8 p.p.** |
+| Failures | 25,208 | −30.3% |
+| **People created** | **30,603** | **+29.6%** |
+| Lost writes | 0 | = |
 | **p50** | **1 ms** | = |
 | p75 | 52 ms | 13× |
-| p95 | 1.090 ms | −32% |
-| **p99** | **1.590 ms** | **−35%** |
-| máx | 3.114 ms | −41% |
-| média | 167 ms | −25% |
-| Vazão máxima com 100% de sucesso | 1.600 req/s ² | 902 req/s |
-| Vazão útil média | 355 req/s | +33% |
-| **Segundos com falha** | 68 de 208 | 85 de 210 |
-| **Ruptura sustentada** | **t=145s — 499 usuários/s** | t=119s — 395 u/s |
-| Primeira falha isolada | t=126s | t=119s |
-| Início da degradação | t=132s | t=119s |
-| Concorrência no pico | 420 | 259 |
-| Vazão nos últimos 60s | 431 req/s | 262 req/s |
+| p95 | 1,090 ms | −32% |
+| **p99** | **1,590 ms** | **−35%** |
+| max | 3,114 ms | −41% |
+| mean | 167 ms | −25% |
+| Peak throughput at 100% success | 1,600 req/s ² | 902 req/s |
+| Mean useful throughput | 355 req/s | +33% |
+| **Seconds with failures** | 68 of 208 | 85 of 210 |
+| **Sustained breaking point** | **t=145s — 499 users/s** | t=119s — 395 u/s |
+| First isolated failure | t=126s | t=119s |
+| Degradation starts | t=132s | t=119s |
+| Peak concurrency | 420 | 259 |
+| Throughput in the last 60s | 431 req/s | 262 req/s |
 
-### Por endpoint
+### Per endpoint
 
-| Endpoint | Requisições | OK | KO | p50 | p99 |
+| Endpoint | Requests | OK | KO | p50 | p99 |
 |---|---|---|---|---|---|
-| criação | 54.627 | 35.813 | 18.814 | 1 ms | 1.504 ms |
-| consulta | 30.603 | 28.749 | 1.854 | 1 ms | 1.473 ms |
-| busca válida | 9.590 | 6.378 | 3.212 | 6 ms | 1.898 ms |
-| busca inválida | 4.190 | 2.862 | 1.328 | 1 ms | 273 ms |
+| criação | 54,627 | 35,813 | 18,814 | 1 ms | 1,504 ms |
+| consulta | 30,603 | 28,749 | 1,854 | 1 ms | 1,473 ms |
+| busca válida | 9,590 | 6,378 | 3,212 | 6 ms | 1,898 ms |
+| busca inválida | 4,190 | 2,862 | 1,328 | 1 ms | 273 ms |
 
-### Diagnóstico
+### Diagnosis
 
-**Redistribuir funcionou — mas metade do previsto.** O diagnóstico estava certo na
-direção e errado na magnitude:
+**Redistributing worked — but half as much as predicted.** The diagnosis was right
+about the direction and wrong about the magnitude:
 
-| | Abordagem 7 | **Abordagem 8** |
+| | Approach 7 | **Approach 8** |
 |---|---|---|
-| Sucesso | 60,72% | **74,54%** |
-| Usuários criados | 23.611 | **30.603** |
-| Ruptura sustentada | t=119s | **t=145s** |
-| Throttling do banco | 41,9% | **33,9%** |
-| CPU do banco (média) | 0,41 de 0,70 | **0,51 de 1,00** |
+| Success | 60.72% | **74.54%** |
+| People created | 23,611 | **30,603** |
+| Sustained breaking point | t=119s | **t=145s** |
+| Database throttling | 41.9% | **33.9%** |
+| Database CPU (mean) | 0.41 of 0.70 | **0.51 of 1.00** |
 
-Trinta por cento mais CPU no banco comprou 26 segundos de sobrevivência e 7 mil
-pessoas a mais. Mas **a previsão de "throttling perto de zero" errou feio: caiu de
-42% para 34%.**
+Thirty percent more CPU on the database bought 26 seconds of survival and 7
+thousand more people. But **the "throttling close to zero" prediction was badly
+wrong: it went from 42% to 34%.**
 
-### Por que 1,00 CPU não bastou, mesmo com uso médio de 51%
+### Why 1.00 CPU was not enough, even at 51% mean usage
 
-O banco consumiu 107 s de CPU em 211 s — **51% da cota** — e ainda assim foi
-congelado em um terço das janelas. O mesmo paradoxo da abordagem 7, agora com uma
-explicação mais concreta.
+The database consumed 107 s of CPU out of 211 s — **51% of the quota** — and was
+still frozen in a third of the windows. The same paradox as approach 7, now with a
+more concrete explanation.
 
-A cota de 1,00 CPU significa **100 ms de CPU a cada janela de 100 ms**. Mas o
-Postgres é multiprocesso: com 2 réplicas × 10 conexões no pool, até **20 backends**
-podem estar prontos para rodar na mesma janela. Se cinco deles quiserem 30 ms
-cada, a demanda instantânea é de 150 ms numa janela de 100 ms — a cota acaba antes
-do fim e todos congelam juntos.
+A quota of 1.00 CPU means **100 ms of CPU in every 100 ms window**. But Postgres is
+multi-process: with 2 replicas × 10 pool connections, up to **20 backends** may be
+runnable in the same window. If five of them each want 30 ms, the instantaneous
+demand is 150 ms in a 100 ms window — the quota runs out before the window ends and
+they all freeze together.
 
 ```
-cota    : 100 ms de CPU por janela de 100 ms
-demanda : N backends x tempo de cada query, simultâneos
+quota  : 100 ms of CPU per 100 ms window
+demand : N backends x the time of each query, simultaneously
 ```
 
-**A média não vê isso.** Em metade das janelas o banco fica quase ocioso, na outra
-metade quer mais de uma CPU inteira. É a terceira vez na série que uma métrica de
-tendência central esconde o comportamento que importa.
+**The mean does not see this.** In half the windows the database sits nearly idle,
+in the other half it wants more than an entire CPU. It is the third time in the
+series that a measure of central tendency hides the behavior that matters.
 
-### O corte do nginx cobrou seu preço
+### The nginx cut charged its price
 
-| | Abordagem 7 (0,20) | Abordagem 8 (0,10) |
+| | Approach 7 (0.20) | Approach 8 (0.10) |
 |---|---|---|
-| Throttling do nginx | 0,2% | **5,4%** |
-| Tempo congelado | 0,1 s | 6,6 s |
+| nginx throttling | 0.2% | **5.4%** |
+| Time frozen | 0.1 s | 6.6 s |
 
-Cortar o nginx pela metade fez o throttling dele subir 27×. Ainda é pequeno perto
-dos 34% do banco, mas explica um efeito colateral visível: a concorrência de pico
-subiu de 259 para **420**. Com menos CPU, o nginx demora mais até para recusar
-conexões, então elas se acumulam em vez de serem descartadas rápido.
+Halving nginx made its throttling rise 27×. It is still small next to the
+database's 34%, but it explains a visible side effect: peak concurrency went from
+259 to **420**. With less CPU, nginx takes longer even to refuse connections, so
+they pile up instead of being discarded quickly.
 
-Aparece também no `busca inválida`, que não toca o banco e mesmo assim teve p99 de
-**273 ms** — contra 7 ms na abordagem 7. Esse endpoint só pode ser afetado por
-throttling do nginx ou do Node.
+It also shows up in `busca inválida`, which never touches the database and still
+had a p99 of **273 ms** — against 7 ms in approach 7. That endpoint can only be
+affected by throttling of nginx or of Node.
 
-### O sistema ainda falha usando 45% do orçamento
+### The system still fails while using 45% of the budget
 
-| Contêiner | Concedido | Usado | Uso | Throttling |
+| Container | Granted | Used | Usage | Throttling |
 |---|---|---|---|---|
-| database | 1,00 | 0,51 | 51% | **33,9%** |
-| api1 | 0,20 | 0,06 | 30% | 1,9% |
-| api2 | 0,20 | 0,06 | 30% | 1,6% |
-| nginx | 0,10 | 0,05 | 45% | 5,4% |
-| **Total** | **1,50** | **0,67** | **45%** | |
+| database | 1.00 | 0.51 | 51% | **33.9%** |
+| api1 | 0.20 | 0.06 | 30% | 1.9% |
+| api2 | 0.20 | 0.06 | 30% | 1.6% |
+| nginx | 0.10 | 0.05 | 45% | 5.4% |
+| **Total** | **1.50** | **0.67** | **45%** | |
 
-Melhorou de 36% para 45%, mas o padrão persiste: **nenhum contêiner chega perto de
-saturar a média, e mesmo assim um quarto das requisições falha**. Continuar
-movendo CPU entre contêineres tem retorno decrescente — as APIs já estão em 30% da
-cota, não há muito mais o que tirar delas.
+It improved from 36% to 45%, but the pattern persists: **no container comes close
+to saturating its mean, and a quarter of the requests still fail**. Continuing to
+move CPU between containers has diminishing returns — the APIs are already at 30%
+of their quota, there is not much left to take from them.
 
-O caminho deixou de ser distribuir melhor. Passou a ser **fazer menos trabalho**.
+The way forward stopped being to distribute better. It became **to do less work**.
 
-### O alvo: 27% da CPU do banco é planejamento de query
+### The target: 27% of the database CPU is query planning
 
-Somando o `Planning Time` de cada endpoint pelo volume desta corrida:
+Summing the `Planning Time` of each endpoint by this run's volume:
 
-| Query | Chamadas | Planning unitário | CPU só de planejamento |
+| Query | Calls | Unit planning | CPU on planning alone |
 |---|---|---|---|
-| consulta | 30.603 | 0,470 ms | **14,4 s** |
-| busca válida | 9.590 | 1,154 ms | **11,1 s** |
-| criação | 54.627 | 0,063 ms | 3,4 s |
-| **Total** | | | **28,9 s de 107 s = 27%** |
+| consulta | 30,603 | 0.470 ms | **14.4 s** |
+| busca válida | 9,590 | 1.154 ms | **11.1 s** |
+| criação | 54,627 | 0.063 ms | 3.4 s |
+| **Total** | | | **28.9 s of 107 s = 27%** |
 
-**Mais de um quarto da CPU do banco é gasto decidindo como executar queries que
-não mudam nunca.** As três são fixas, com os mesmos parâmetros posicionais a cada
-chamada — o plano poderia ser calculado uma vez e reutilizado.
+**More than a quarter of the database CPU is spent deciding how to execute queries
+that never change.** All three are fixed, with the same positional parameters on
+every call — the plan could be computed once and reused.
 
-A reconciliação fecha exata:
+The reconciliation closes exactly:
 
 ```
-Gatling KO   : 25.208 = 25.041 Premature close + 167 status 500
-status 500   :    167 = worker_connections ao conectar no upstream
-status 201   : 30.603 = linhas no Postgres = requisições `consulta`
-status 400   :  3.112 = 2.862 do `busca inválida` + 250 do `criação`
-erros no PG  :      0 de conexão
+Gatling KO       : 25,208 = 25,041 Premature close + 167 status 500
+status 500       :    167 = worker_connections when connecting upstream
+status 201       : 30,603 = rows in Postgres = `consulta` requests
+status 400       :  3,112 = 2,862 from `busca inválida` + 250 from `criação`
+errors in Postgres:     0 connection errors
 ```
 
-### Próximo passo
+### Next step
 
-**Prepared statements.** O driver `pg` suporta via a opção `name` na query: o
-Postgres planeja na primeira chamada e reutiliza o plano nas seguintes. Ataca
-diretamente os 28,9 s — cerca de 27% da CPU do banco — sem custar nada em memória
-ou concorrência.
+**Prepared statements.** The `pg` driver supports them via the `name` option on
+the query: Postgres plans on the first call and reuses the plan on the following
+ones. It attacks the 28.9 s — about 27% of the database CPU — directly, at no cost
+in memory or concurrency.
 
-Um ajuste secundário a considerar junto: **o pool de 10 por processo pode estar
-grande demais para 1,00 CPU**. Vinte backends disputando o equivalente a uma CPU
-produzem justamente a rajada que estoura a janela de 100 ms. Um pool menor
-enfileiraria mais na aplicação, mas com rajadas menores no banco. Vale medir
-separadamente do prepared statement, uma variável por vez.
+A secondary adjustment to consider alongside it: **the pool of 10 per process may
+be too large for 1.00 CPU**. Twenty backends competing for the equivalent of one
+CPU produce exactly the burst that blows past the 100 ms window. A smaller pool
+would queue more in the application, but with smaller bursts at the database.
+Worth measuring separately from the prepared statement, one variable at a time.
 
 ---
 
-## Método
+## Method
 
 ```
-npm run bench     # reset do ambiente + teste completo
-npm run report    # abre o relatório da última execução
-npm run stats     # CPU/memória por container, ao vivo (segundo terminal)
+npm run bench     # reset the environment + full test
+npm run report    # open the report of the last run
+npm run stats     # CPU/memory per container, live (second terminal)
 ```
 
-O teste é o Gatling oficial, copiado para `stress-test/`: três cenários em
-paralelo por 3min25s, com rampa até 740 usuários/s combinados.
+The test is the official Gatling one, copied into `stress-test/`: three scenarios
+in parallel for 3min25s, with a ramp up to 740 combined users/s.
 
-### Regras que tornam as medições comparáveis
+### Rules that make the measurements comparable
 
-**O banco precisa ser zerado entre execuções.** Cinco rodadas iniciais deste
-projeto oscilaram entre 99,8% e 32,5% de sucesso **sem nenhuma mudança de
-código** — o volume do Postgres sobrevivia ao `docker compose down` e cada rodada
-empilhava ~50 mil pessoas na tabela. Por isso `infra:down` sempre usa `-v`, e o
-`bench` confere que a contagem inicial é `0`.
+**The database must be wiped between runs.** Five early rounds of this project
+swung between 99.8% and 32.5% success **with no code change at all** — the
+Postgres volume survived `docker compose down` and each round piled up ~50
+thousand people in the table. That is why `infra:down` always uses `-v`, and why
+`bench` checks that the initial count is `0`.
 
-**O JDK precisa ser o 17.** O Gatling 3.9.5 compila a simulação em Scala 2.13.10,
-que não lê class files de JDKs modernos e falha com `bad constant pool index: 0`.
-O `run-test.sh` fixa o `JAVA_HOME` internamente.
+**The JDK must be 17.** Gatling 3.9.5 compiles the simulation in Scala 2.13.10,
+which cannot read class files from modern JDKs and fails with
+`bad constant pool index: 0`. `run-test.sh` pins `JAVA_HOME` internally.
 
-### Ambiente
+### Environment
 
 | | |
 |---|---|
-| Máquina | Apple Silicon, 12 CPUs, 24 GB |
-| VM do Docker | 12 CPUs, 7,75 GB |
-| Gerador de carga | Gatling 3.9.5 sobre Temurin 17, na mesma máquina |
+| Machine | Apple Silicon, 12 CPUs, 24 GB |
+| Docker VM | 12 CPUs, 7.75 GB |
+| Load generator | Gatling 3.9.5 on Temurin 17, on the same machine |
 | Postgres | 16.0-alpine |
 | Node | 24.15.0-alpine |
 
-O gerador de carga divide CPU com a aplicação, então os números absolutos não são
-comparáveis com o ranking oficial (rodado em EC2). O que vale é a **comparação
-entre abordagens sob condições idênticas**.
+The load generator shares CPU with the application, so the absolute numbers are not
+comparable with the official ranking (run on EC2). What counts is the **comparison
+between approaches under identical conditions**.
 
-### Como ler os números
+### How to read the numbers
 
-O Gatling injeta em **modelo aberto**: cria usuários numa taxa fixa olhando o
-relógio, sem olhar a saúde do servidor. Se a API satura, a carga não recua — por
-isso a vazão desaba em vez de estabilizar num platô.
+Gatling injects in an **open model**: it creates users at a fixed rate by the
+clock, without looking at the health of the server. If the API saturates, the load
+does not back off — which is why throughput collapses instead of settling on a
+plateau.
 
-- **Taxa de injeção** é a carga *oferecida*, não a aceita. Não confundir com
-  requisições/s (cada usuário do cenário A faz até 2) nem com usuários
-  simultâneos (`L = λ × W`).
-- O gráfico **"Active Users"** conta todo usuário que existiu em *algum momento*
-  do segundo; as métricas aqui usam o retrato instantâneo, que é o que disputa
-  recursos. Na abordagem 1: `996 = 263 simultâneos + 734 criados no segundo`.
-- A taxa de injeção não aparece em gráfico nenhum: vem do código da simulação. O
-  instante da ruptura é visível em **"Number of responses per second"**, onde a
-  faixa vermelha de KO começa.
+- **Injection rate** is the load *offered*, not the load accepted. Do not confuse
+  it with requests/s (each user of scenario A makes up to 2) nor with simultaneous
+  users (`L = λ × W`).
+- The **"Active Users"** chart counts every user that existed at *any moment*
+  within the second; the metrics here use the instantaneous snapshot, which is
+  what competes for resources. In approach 1: `996 = 263 simultaneous + 734
+  created during the second`.
+- The injection rate appears in no chart at all: it comes from the simulation code.
+  The instant of the break is visible in **"Number of responses per second"**,
+  where the red KO band begins.

@@ -104,7 +104,7 @@ Open the Gatling report with `npm run report`.
 
 ## Documentation
 
-- [BENCHMARKS.md](BENCHMARKS.md): the eight approaches, one by one, with prediction, statistics, and diagnosis (in Portuguese).
+- [BENCHMARKS.md](BENCHMARKS.md): the eight approaches, one by one, with prediction, statistics, and diagnosis.
 - [STRESS_TEST.md](STRESS_TEST.md): how the official test works, scenario by scenario (in Portuguese).
 - [INTRUÇOES.MD](INTRUÇOES.MD): the original competition rules (in Portuguese).
 
