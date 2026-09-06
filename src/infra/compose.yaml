@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: rinha
       POSTGRES_PASSWORD: rinha
     ports:
-      - 5432:5432
+      - 5434:5432
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
@@ -18,8 +18,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.70"
-          memory: "1.4GB"
+          cpus: "1.00"
+          memory: "1.5GB"
 
   api1:
     container_name: "rinha_api1"
@@ -38,7 +38,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.30"
+          cpus: "0.20"
           memory: "0.6GB"
 
   api2:
@@ -58,7 +58,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.30"
+          cpus: "0.20"
           memory: "0.6GB"
 
   nginx:
@@ -74,5 +74,5 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
-          memory: "0.4GB"
+          cpus: "0.10"
+          memory: "0.3GB"
